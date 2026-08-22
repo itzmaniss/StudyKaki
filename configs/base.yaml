@@ -1,0 +1,19 @@
+# Single source of truth — ARCHITECTURE.md §6. Nothing tunable is hardcoded elsewhere.
+#
+# `device: GPU` is the intent for the target machine (Intel i5 11th gen / Iris Xe).
+# Every model load falls back to CPU and logs which device it got, so this file stays
+# honest about intent even on hardware with no GPU plugin. See BLOCKERS.md.
+
+models:
+  ocr_det:   { name: PP-OCRv6_mobile_det, device: GPU, precision: int8 }
+  ocr_rec:   { name: PP-OCRv5_mobile_rec, device: GPU, precision: int8 }
+  embedder:  { name: bge-m3,              device: GPU, precision: int8 }
+  generator: { name: qwen3-4b-instruct,   device: CPU, precision: int4 }
+
+chunk:    { target_tokens: 400, overlap: 60, min_tokens: 80 }
+retrieve: { k: 20, n_context: 5, tau: 0.35 }
+generate: { max_new_tokens: 512, temperature: 0.2 }
+
+paths:
+  data_dir: data
+  ov_cache_dir: .ov_cache   # §7.2 — first GPU compile is slow, cached is seconds

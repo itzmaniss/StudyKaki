@@ -1,0 +1,16 @@
+# PLACEHOLDER SET — structure only, not real labels. See BLOCKERS.md "golden set".
+# Real questions require the actual corpus; §5 wants 40-60 with 10 cross-lingual,
+# 5 unanswerable (gold_pages: []), 5 needing a table/figure caption.
+# Every entry below has note="PLACEHOLDER" so it is greppable and cannot be mistaken for gold.
+{"q": "What is the role of chlorophyll in photosynthesis?", "lang": "en", "doc_id": "PLACEHOLDER_DOC_A", "gold_pages": [42], "note": "PLACEHOLDER"}
+{"q": "Define the light-dependent reactions.", "lang": "en", "doc_id": "PLACEHOLDER_DOC_A", "gold_pages": [43, 44], "note": "PLACEHOLDER"}
+{"q": "Summarise the table of enzyme optimum temperatures.", "lang": "en", "doc_id": "PLACEHOLDER_DOC_A", "gold_pages": [51], "note": "PLACEHOLDER table"}
+{"q": "ஒளிச்சேர்க்கையில் பச்சையத்தின் பங்கு என்ன?", "lang": "ta", "doc_id": "PLACEHOLDER_DOC_A", "gold_pages": [42], "note": "PLACEHOLDER cross-lingual"}
+{"q": "நொதிகளின் உகந்த வெப்பநிலை என்ன?", "lang": "ta", "doc_id": "PLACEHOLDER_DOC_B", "gold_pages": [12], "note": "PLACEHOLDER"}
+{"q": "细胞呼吸的三个阶段是什么？", "lang": "zh", "doc_id": "PLACEHOLDER_DOC_B", "gold_pages": [18, 19], "note": "PLACEHOLDER cross-lingual"}
+{"q": "图 3.2 的标题说明了什么？", "lang": "zh", "doc_id": "PLACEHOLDER_DOC_B", "gold_pages": [20], "note": "PLACEHOLDER caption"}
+{"q": "What does the diagram on the mitochondrion label?", "lang": "en", "doc_id": "PLACEHOLDER_DOC_B", "gold_pages": [21], "note": "PLACEHOLDER caption"}
+{"q": "Who won the 2026 football world cup?", "lang": "en", "doc_id": "PLACEHOLDER_DOC_A", "gold_pages": [], "note": "PLACEHOLDER unanswerable"}
+{"q": "What is my exam timetable for next week?", "lang": "en", "doc_id": "PLACEHOLDER_DOC_A", "gold_pages": [], "note": "PLACEHOLDER unanswerable"}
+{"q": "இந்த புத்தகத்தின் விலை என்ன?", "lang": "ta", "doc_id": "PLACEHOLDER_DOC_B", "gold_pages": [], "note": "PLACEHOLDER unanswerable"}
+{"q": "Explain the Calvin cycle step by step.", "lang": "en", "doc_id": "PLACEHOLDER_DOC_A", "gold_pages": [45, 46], "note": "PLACEHOLDER"}

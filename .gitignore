@@ -1,0 +1,29 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Generated data — caches, indexes, eval runs, traces (ARCHITECTURE.md §0.1)
+data/*
+!data/.gitkeep
+
+# Vectors and parquet are generated; fixtures are not (tests/fixtures stays < 5 MB)
+*.npy
+*.parquet
+!tests/fixtures/**
+
+# Converted model IR — manifest.json is committed, weights are not (§7.3)
+models/ir/
+.ov_cache/
+
+# Tooling
+.ruff_cache/
+.pytest_cache/
+.claude-flow/
+.swarm/

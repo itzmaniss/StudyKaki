@@ -1,0 +1,50 @@
+[project]
+name = "intel-2026"
+version = "0.1.0"
+description = "Offline multilingual study RAG — OpenVINO, 100% local"
+readme = "README.md"
+authors = [{ name = "Manish", email = "bmanish04@outlook.com" }]
+requires-python = "==3.11.*"
+dependencies = [
+  "openvino==2026.3.0",
+  "openvino-tokenizers==2026.3.0",
+  "openvino-genai==2026.3.0",
+  "nncf==2.18.0",
+  "optimum-intel==1.25.2",
+  "polars>=1.20",
+  "pyarrow>=19",
+  "numpy>=2.1",
+  "pymupdf>=1.25",
+  "pydantic-settings>=2.7",
+  "pyyaml>=6.0",
+  "structlog>=24.4",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "ruff>=0.8",
+]
+
+# Flat top-level packages per ARCHITECTURE.md §1 (core/, ingest/, retrieve/, ...).
+# Nothing here is installed as a distribution; modules run as `python -m eval.run`.
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# ARCHITECTURE.md is the contract and must never be reformatted (CLAUDE.md prime directive 5).
+# ruff format rewrites Python code blocks inside Markdown, so exclude docs explicitly.
+extend-exclude = ["*.md", "data", ".ov_cache"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ANN"]
+ignore = ["ANN401"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
