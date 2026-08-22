@@ -17,6 +17,7 @@ such workaround and is gated behind that import — see `convert_causal_lm`.
 
     uv run python -m models.convert --only embedder
     uv run python -m models.convert --all
+    uv run python -m models.convert --only embedder --tokenizer-only
 """
 
 from __future__ import annotations
@@ -45,6 +46,9 @@ from models.registry import (
 log = structlog.get_logger("models.convert")
 
 IR_ROOT = Path(__file__).resolve().parent / "ir"
+
+TOKENIZER_XML_NAME = "openvino_tokenizer.xml"
+DETOKENIZER_XML_NAME = "openvino_detokenizer.xml"
 
 Kind = Literal["hf_encoder", "hf_causal_lm", "paddle"]
 
@@ -335,7 +339,15 @@ def convert_paddle(src: ModelSource, precision: str, out_root: Path) -> Path:
 
 
 def _save_ov_tokenizer(tokenizer: Any, ir_dir: Path, *, with_detokenizer: bool) -> None:
-    """§0.4 — every model runs through OpenVINO, tokenisers included."""
+    """§0.4 — every model runs through OpenVINO, tokenisers included.
+
+    Saved **uncompressed**. `ov.save_model` defaults to `compress_to_fp16=True`, which is
+    right for encoder activations and wrong here: a tokenizer's weights are a vocabulary
+    table, not activations, so f16 buys nothing and BGE-M3's Unigram/SentencePiece op is a
+    *reference* implementation that reads its vocab scores as f32. Compressed, it dies at
+    infer time with "element type f16, is not representable as pointer to f32" — a failure
+    that surfaces in the embedder, three layers away from its cause.
+    """
     try:
         from openvino_tokenizers import convert_tokenizer
     except ImportError as e:
@@ -347,9 +359,44 @@ def _save_ov_tokenizer(tokenizer: Any, ir_dir: Path, *, with_detokenizer: bool) 
         log.warning("convert.ov_tokenizer_failed", ir_dir=str(ir_dir), error=str(e))
         return
     tok, detok = converted if isinstance(converted, tuple) else (converted, None)
-    ov.save_model(tok, ir_dir / "openvino_tokenizer.xml")
+    ir_dir.mkdir(parents=True, exist_ok=True)
+    ov.save_model(tok, ir_dir / TOKENIZER_XML_NAME, compress_to_fp16=False)
     if detok is not None:
-        ov.save_model(detok, ir_dir / "openvino_detokenizer.xml")
+        ov.save_model(detok, ir_dir / DETOKENIZER_XML_NAME, compress_to_fp16=False)
+    log.info(
+        "convert.ov_tokenizer_saved",
+        ir_dir=str(ir_dir),
+        detokenizer=detok is not None,
+        compressed=False,
+    )
+
+
+def regenerate_tokenizer(name: str, cfg: Config, *, out_root: Path = IR_ROOT) -> Path:
+    """Rewrite only `openvino_tokenizer.xml` beside an already-converted model.
+
+    Kept separate from `convert(..., overwrite=True)` on purpose: re-running the full
+    conversion re-quantises the weights, which produces a different `ir_sha256` and so
+    invalidates every index built against the old one (§3.1 rule 4). A tokenizer defect
+    is not a reason to force a re-index.
+    """
+    from models.registry import spec_for
+
+    _, spec = spec_for(name, cfg)
+    src = source_for(spec.name)
+    ir_dir = _ir_dir(src, spec.precision, out_root)
+    if not (ir_dir / IR_XML_NAME).exists():
+        raise ConversionError(
+            f"{src.name}: no converted IR at {ir_dir} — there is nothing to regenerate a "
+            f"tokenizer beside. Run `uv run python -m scripts.setup --only {name}` first."
+        )
+
+    from transformers import AutoTokenizer
+
+    snapshot = snapshot_dir(src)
+    tokenizer = AutoTokenizer.from_pretrained(snapshot)
+    tokenizer.save_pretrained(ir_dir)
+    _save_ov_tokenizer(tokenizer, ir_dir, with_detokenizer=src.kind == "hf_causal_lm")
+    return ir_dir
 
 
 _CONVERTERS = {
@@ -445,6 +492,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out-root", type=Path, default=IR_ROOT)
     ap.add_argument("--manifest", type=Path, default=MANIFEST_PATH)
     ap.add_argument("--overwrite", action="store_true")
+    ap.add_argument(
+        "--tokenizer-only",
+        action="store_true",
+        help="rewrite openvino_tokenizer.xml beside existing IR; leaves ir_sha256 alone",
+    )
     args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
@@ -459,6 +511,10 @@ def main(argv: list[str] | None = None) -> int:
             from models.registry import spec_for
 
             _, spec = spec_for(target, cfg)
+            if args.tokenizer_only:
+                ir_dir = regenerate_tokenizer(target, cfg, out_root=args.out_root)
+                print(f"tokenizer regenerated: {ir_dir / TOKENIZER_XML_NAME}")
+                continue
             entries[spec.name] = convert(
                 target, cfg, out_root=args.out_root, overwrite=args.overwrite
             )

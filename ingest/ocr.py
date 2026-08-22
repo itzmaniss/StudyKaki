@@ -239,6 +239,14 @@ class OcrEngine:
         unknown = sorted(set(recognizers) - SCRIPTS)
         if unknown:
             raise OcrError(f"recognition heads keyed by unknown scripts: {unknown}")
+        # Routing looks a head up by its key and re-keys the result by `head.script`; if the
+        # two disagree the re-key hits a script with no head registered under it.
+        mismatched = sorted(k for k, r in recognizers.items() if r.script != k)
+        if mismatched:
+            raise OcrError(
+                f"recognition head disagrees with the script it is keyed by: "
+                f"{[(k, recognizers[k].script) for k in mismatched]}"
+            )
         if DEFAULT_SCRIPT not in recognizers and len(recognizers) > 1:
             raise OcrError(
                 f"more than one recognition head but no {DEFAULT_SCRIPT!r} default — "
@@ -274,7 +282,7 @@ class OcrEngine:
         blocks: list[Block] = []
         for box, result, script in zip(boxes, texts, scripts, strict=True):
             text = result.text.strip()
-            if not text or result.confidence < self.params.threshold_for(script):
+            if not text or result.confidence < self._threshold_for(text, script):
                 continue
             bbox = _normalise_bbox(box, height, width)
             if bbox is None:
@@ -293,6 +301,14 @@ class OcrEngine:
                 )
             )
         return blocks
+
+    def _threshold_for(self, text: str, script: str) -> float:
+        """The default head is multilingual and has no script of its own, so a threshold keyed
+        on `head.script` would make `confidence_by_script` a no-op in the shipping engine —
+        where that head reads every line. Fall back to the script of the text it read."""
+        if script == DEFAULT_SCRIPT:
+            script = detect_script(text)
+        return self.params.threshold_for(script)
 
     def _recognize(self, crops: Sequence[np.ndarray]) -> tuple[list[RecResult], list[str]]:
         results = list(self._primary.recognize(crops))

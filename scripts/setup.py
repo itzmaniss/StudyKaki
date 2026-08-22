@@ -9,6 +9,11 @@ If you find a runtime import reaching out, that is a bug, not a feature.
     uv run python -m scripts.setup --only embedder
     uv run python -m scripts.setup --skip-warm     # CI / low-disk
 
+To repair a tokenizer without re-quantising the weights (which would change `ir_sha256`
+and invalidate every existing index, §3.1 rule 4):
+
+    uv run python -m models.convert --only embedder --tokenizer-only
+
 Each model is independent: one failure is reported and the rest still run, because a
 missing generator should not stop you from indexing.
 """

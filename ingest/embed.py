@@ -119,7 +119,10 @@ class OVTokenizer:
         return cls(compiled)
 
     def __call__(self, texts: Sequence[str]) -> tuple[np.ndarray, np.ndarray]:
-        result = self._request.infer([np.array(list(texts), dtype=object)])
+        # A `string` input tensor is filled from a numpy *unicode* array (`<U`). An
+        # `object` array of `str` is rejected with "Unknown string kind passed to fill the
+        # Tensor's data!", and a bare list is read as a scalar and fails the shape check.
+        result = self._request.infer([np.array(list(texts))])
         return (
             np.asarray(result[INPUT_IDS], dtype=np.int64),
             np.asarray(result[ATTENTION_MASK], dtype=np.int64),
