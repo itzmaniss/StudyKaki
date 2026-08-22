@@ -1,0 +1,477 @@
+"""HF / Paddle checkpoint -> OpenVINO IR -> INT8/INT4, and write `models/manifest.json`.
+
+ARCHITECTURE.md §1, §3.1 (fingerprint fields), §7.3 (convert once, offline; commit the
+manifest, not the weights).
+
+**This module never touches the network.** It reads checkpoints from the local Hugging Face
+cache (`local_files_only=True`); `scripts/setup.py` is the only thing allowed to download
+(§0.3). Running convert on a cold cache raises with the setup command to run.
+
+Conversion goes through OpenVINO's **native PyTorch frontend** (`ov.convert_model`), not
+optimum's ONNX exporter: `optimum.exporters.onnx.model_patcher` imports private symbols
+(`_attention_scale`, `_causal_attention_mask`, ...) that torch 2.13 removed from
+`torch.onnx.symbolic_opset14`, so importing `optimum.intel` at all raises ImportError on
+this environment. The PyTorch frontend needs only pinned deps: openvino + nncf + torch.
+Stateful causal-LM export (KV cache, what `openvino_genai.LLMPipeline` requires) has no
+such workaround and is gated behind that import — see `convert_causal_lm`.
+
+    uv run python -m models.convert --only embedder
+    uv run python -m models.convert --all
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Literal
+
+import openvino as ov
+import structlog
+
+from core.config import Config, load_config
+from models.registry import (
+    IR_BIN_NAME,
+    IR_XML_NAME,
+    MANIFEST_PATH,
+    MANIFEST_SCHEMA_VERSION,
+    ROLES,
+    file_sha256,
+    ov_version,
+)
+
+log = structlog.get_logger("models.convert")
+
+IR_ROOT = Path(__file__).resolve().parent / "ir"
+
+Kind = Literal["hf_encoder", "hf_causal_lm", "paddle"]
+
+
+class ConversionError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class ModelSource:
+    """Where a model in `configs/base.yaml` actually comes from.
+
+    `hf_revision` is a commit SHA, never a branch — HF models are updated in place and a
+    branch name would let the weights change under a fingerprint that says they didn't
+    (§3.1 rule 1).
+    """
+
+    name: str
+    role: str
+    kind: Kind
+    hf_id: str
+    hf_revision: str
+    #: Declared §3.1 fingerprint fields. Cross-checked against the checkpoint at conversion
+    #: so a model swap cannot silently change dim/pooling/max_len.
+    embedding: dict[str, Any] | None = None
+    allow_patterns: tuple[str, ...] = ()
+    ignore_patterns: tuple[str, ...] = field(default_factory=tuple)
+
+
+SOURCES: dict[str, ModelSource] = {
+    "bge-m3": ModelSource(
+        name="bge-m3",
+        role="embedder",
+        kind="hf_encoder",
+        hf_id="BAAI/bge-m3",
+        hf_revision="5617a9f61b028005a4858fdac845db406aefb181",
+        embedding={
+            "dim": 1024,
+            "pooling": "cls",
+            "normalize": True,
+            "max_len": 8192,
+            # BGE-M3 is symmetric and wants no prefixes; E5-family models do. The values
+            # travel with the index, not the code (§3.1 rule 3).
+            "query_prefix": "",
+            "passage_prefix": "",
+        },
+        ignore_patterns=("onnx/*", "*.onnx", "*.onnx_data", "imgs/*", "*.msgpack", "*.h5"),
+    ),
+    "qwen3-4b-instruct": ModelSource(
+        name="qwen3-4b-instruct",
+        role="generator",
+        kind="hf_causal_lm",
+        hf_id="Qwen/Qwen3-4B-Instruct-2507",
+        hf_revision="cdbee75f17c01a7cc42f958dc650907174af0554",
+        ignore_patterns=("original/*", "*.gguf"),
+    ),
+    # configs/base.yaml names PP-OCRv6_mobile_det/rec. No such public checkpoint exists —
+    # PaddlePaddle/PP-OCRv6_* returns 401 on the HF API. v5 mobile is the newest available
+    # and is what PaddleOCR itself ships. See BLOCKERS.md.
+    "PP-OCRv5_mobile_det": ModelSource(
+        name="PP-OCRv5_mobile_det",
+        role="ocr_det",
+        kind="paddle",
+        hf_id="PaddlePaddle/PP-OCRv5_mobile_det",
+        hf_revision="0d63e78e2b680928f6b1747d76a08db6e645efb7",
+    ),
+    "PP-OCRv5_mobile_rec": ModelSource(
+        name="PP-OCRv5_mobile_rec",
+        role="ocr_rec",
+        kind="paddle",
+        hf_id="PaddlePaddle/PP-OCRv5_mobile_rec",
+        hf_revision="682f20538d8c086cb2128e5cfac775e6c4904e85",
+    ),
+}
+
+
+def source_for(name: str) -> ModelSource:
+    src = SOURCES.get(name)
+    if src is None:
+        raise ConversionError(
+            f"no conversion source registered for model {name!r} — known: "
+            f"{', '.join(sorted(SOURCES))}. Add it to models/convert.py SOURCES, or fix "
+            f"the name in configs/base.yaml."
+        )
+    return src
+
+
+def snapshot_dir(src: ModelSource, *, allow_download: bool = False) -> Path:
+    """Locate the checkpoint. Offline by default — downloading is `scripts/setup.py`'s job."""
+    from huggingface_hub import snapshot_download
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    try:
+        return Path(
+            snapshot_download(
+                src.hf_id,
+                revision=src.hf_revision,
+                local_files_only=not allow_download,
+                ignore_patterns=list(src.ignore_patterns) or None,
+                allow_patterns=list(src.allow_patterns) or None,
+            )
+        )
+    except (LocalEntryNotFoundError, FileNotFoundError, OSError) as e:
+        if allow_download:
+            raise ConversionError(f"could not fetch {src.hf_id}@{src.hf_revision[:8]}: {e}") from e
+        raise ConversionError(
+            f"{src.hf_id}@{src.hf_revision[:8]} is not in the local HF cache and "
+            f"models/convert.py is offline by design (§0.3) — run "
+            f"`uv run python -m scripts.setup` first"
+        ) from e
+
+
+def _ir_dir(src: ModelSource, precision: str, out_root: Path) -> Path:
+    return out_root / f"{src.name}-{precision}"
+
+
+def _compress(model: ov.Model, precision: str, name: str) -> ov.Model:
+    if precision in ("fp32", "fp16"):
+        return model
+    import nncf
+
+    modes = {"int8": nncf.CompressWeightsMode.INT8_ASYM, "int4": nncf.CompressWeightsMode.INT4_SYM}
+    mode = modes.get(precision)
+    if mode is None:
+        raise ConversionError(f"{name}: unsupported precision {precision!r}")
+    log.info("convert.compress_weights", model=name, precision=precision)
+    kwargs: dict[str, Any] = {"mode": mode}
+    if precision == "int4":
+        kwargs.update(group_size=128, ratio=0.8)
+    return nncf.compress_weights(model, **kwargs)
+
+
+def _save(model: ov.Model, ir_dir: Path, precision: str) -> None:
+    ir_dir.mkdir(parents=True, exist_ok=True)
+    ov.save_model(model, ir_dir / IR_XML_NAME, compress_to_fp16=precision != "fp32")
+
+
+def _checked_embedding(src: ModelSource, snapshot: Path) -> dict[str, Any]:
+    """Derive dim/pooling/max_len from the checkpoint and refuse to disagree with SOURCES.
+
+    A checkpoint that no longer matches the declared fingerprint is exactly the silent
+    drift §3.1 exists to prevent, so it fails the conversion instead of the retrieval.
+    """
+    declared = dict(src.embedding or {})
+    if not declared:
+        return {}
+
+    found: dict[str, Any] = {}
+    cfg_json = snapshot / "config.json"
+    if cfg_json.exists():
+        hidden = json.loads(cfg_json.read_text()).get("hidden_size")
+        if hidden:
+            found["dim"] = int(hidden)
+    sbert = snapshot / "sentence_bert_config.json"
+    if sbert.exists():
+        max_len = json.loads(sbert.read_text()).get("max_seq_length")
+        if max_len:
+            found["max_len"] = int(max_len)
+    pooling_json = snapshot / "1_Pooling" / "config.json"
+    if pooling_json.exists():
+        pool = json.loads(pooling_json.read_text())
+        if pool.get("pooling_mode_cls_token"):
+            found["pooling"] = "cls"
+        elif pool.get("pooling_mode_mean_tokens"):
+            found["pooling"] = "mean"
+
+    drift = {k: (declared[k], v) for k, v in found.items() if declared.get(k) != v}
+    if drift:
+        raise ConversionError(
+            f"{src.name}: checkpoint disagrees with the declared fingerprint (§3.1) — "
+            + "; ".join(f"{k}: declared={d!r} checkpoint={f!r}" for k, (d, f) in drift.items())
+            + ". Fix models/convert.py SOURCES and re-index everything."
+        )
+    return declared
+
+
+def convert_encoder(src: ModelSource, precision: str, out_root: Path) -> Path:
+    """BGE-M3 and friends, via OpenVINO's PyTorch frontend (no ONNX round-trip)."""
+    import torch
+    from transformers import AutoModel, AutoTokenizer
+
+    snapshot = snapshot_dir(src)
+    ir_dir = _ir_dir(src, precision, out_root)
+
+    log.info("convert.load_checkpoint", model=src.name, snapshot=str(snapshot))
+    model = AutoModel.from_pretrained(snapshot, torch_dtype=torch.float32)
+    model.eval()
+
+    example = {
+        "input_ids": torch.ones(1, 16, dtype=torch.int64),
+        "attention_mask": torch.ones(1, 16, dtype=torch.int64),
+    }
+    with torch.no_grad():
+        ov_model = ov.convert_model(
+            model,
+            example_input=example,
+            input=[
+                ("input_ids", ov.PartialShape([-1, -1]), ov.Type.i64),
+                ("attention_mask", ov.PartialShape([-1, -1]), ov.Type.i64),
+            ],
+        )
+    _name_tensors(
+        ov_model,
+        inputs=["input_ids", "attention_mask"],
+        outputs=["last_hidden_state", "pooler_output"],
+    )
+    ov_model = _compress(ov_model, precision, src.name)
+    _save(ov_model, ir_dir, precision)
+
+    tokenizer = AutoTokenizer.from_pretrained(snapshot)
+    tokenizer.save_pretrained(ir_dir)
+    _save_ov_tokenizer(tokenizer, ir_dir, with_detokenizer=False)
+    return ir_dir
+
+
+def _name_tensors(model: ov.Model, inputs: list[str], outputs: list[str]) -> None:
+    """The PyTorch frontend names tensors after graph node ids (`43`, `1893`).
+
+    Callers address tensors by name, so an unnamed `attention_mask` is a guessing game and
+    an unnamed `last_hidden_state` invites reading `pooler_output` by mistake — which would
+    silently degrade retrieval, the failure mode §3.1 exists to prevent.
+    """
+    for port, name in zip(model.inputs, inputs, strict=False):
+        port.get_tensor().set_names({name})
+    for port, name in zip(model.outputs, outputs, strict=False):
+        port.get_tensor().set_names({name})
+
+
+def convert_causal_lm(src: ModelSource, precision: str, out_root: Path) -> Path:
+    """Qwen3-4B INT4 — needs optimum-intel's *stateful* export for `LLMPipeline` KV cache.
+
+    Hand-rolling a stateful decoder export is not a workaround; if optimum cannot import,
+    this fails loudly rather than producing an IR that generates at 1/10th the speed.
+    """
+    try:
+        from optimum.intel import OVModelForCausalLM, OVWeightQuantizationConfig
+    except ImportError as e:
+        raise ConversionError(
+            f"{src.name}: optimum-intel cannot be imported, so the stateful causal-LM "
+            f"export is unavailable ({e}). optimum 1.27 imports private symbols that "
+            f"torch 2.13 removed from torch.onnx.symbolic_opset14. Fix by pinning torch "
+            f"below 2.13 (`uv add 'torch<2.13'`) — do not hand-roll the KV-cache export."
+        ) from e
+
+    snapshot = snapshot_dir(src)
+    ir_dir = _ir_dir(src, precision, out_root)
+    bits = {"int4": 4, "int8": 8}.get(precision)
+    if bits is None:
+        raise ConversionError(f"{src.name}: unsupported generator precision {precision!r}")
+
+    log.info("convert.export_causal_lm", model=src.name, precision=precision)
+    quant = OVWeightQuantizationConfig(bits=bits, group_size=128, ratio=0.8, sym=True)
+    ov_model = OVModelForCausalLM.from_pretrained(
+        snapshot, export=True, stateful=True, quantization_config=quant
+    )
+    ir_dir.mkdir(parents=True, exist_ok=True)
+    ov_model.save_pretrained(ir_dir)
+
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(snapshot)
+    tokenizer.save_pretrained(ir_dir)
+    _save_ov_tokenizer(tokenizer, ir_dir, with_detokenizer=True)
+    return ir_dir
+
+
+def convert_paddle(src: ModelSource, precision: str, out_root: Path) -> Path:
+    """PaddleOCR mobile det/rec — OpenVINO reads Paddle inference models natively."""
+    snapshot = snapshot_dir(src)
+    candidates = [snapshot / "inference.json", snapshot / "inference.pdmodel"]
+    model_file = next((c for c in candidates if c.exists()), None)
+    if model_file is None:
+        raise ConversionError(
+            f"{src.name}: no Paddle inference model in {snapshot} "
+            f"(looked for {', '.join(c.name for c in candidates)})"
+        )
+
+    log.info("convert.paddle", model=src.name, source=str(model_file))
+    ov_model = ov.convert_model(model_file)
+    ov_model = _compress(ov_model, precision, src.name)
+    ir_dir = _ir_dir(src, precision, out_root)
+    _save(ov_model, ir_dir, precision)
+    for extra in ("inference.yml", "config.json"):
+        p = snapshot / extra
+        if p.exists():
+            (ir_dir / extra).write_bytes(p.read_bytes())
+    return ir_dir
+
+
+def _save_ov_tokenizer(tokenizer: Any, ir_dir: Path, *, with_detokenizer: bool) -> None:
+    """§0.4 — every model runs through OpenVINO, tokenisers included."""
+    try:
+        from openvino_tokenizers import convert_tokenizer
+    except ImportError as e:
+        log.warning("convert.ov_tokenizer_unavailable", ir_dir=str(ir_dir), error=str(e))
+        return
+    try:
+        converted = convert_tokenizer(tokenizer, with_detokenizer=with_detokenizer)
+    except (RuntimeError, TypeError, NotImplementedError, OSError) as e:
+        log.warning("convert.ov_tokenizer_failed", ir_dir=str(ir_dir), error=str(e))
+        return
+    tok, detok = converted if isinstance(converted, tuple) else (converted, None)
+    ov.save_model(tok, ir_dir / "openvino_tokenizer.xml")
+    if detok is not None:
+        ov.save_model(detok, ir_dir / "openvino_detokenizer.xml")
+
+
+_CONVERTERS = {
+    "hf_encoder": convert_encoder,
+    "hf_causal_lm": convert_causal_lm,
+    "paddle": convert_paddle,
+}
+
+
+def convert(
+    name: str,
+    cfg: Config,
+    *,
+    out_root: Path = IR_ROOT,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Convert one model and return its `manifest.json` entry."""
+    from models.registry import spec_for
+
+    role, spec = spec_for(name, cfg)
+    src = source_for(spec.name)
+    if src.role != role:
+        raise ConversionError(f"{spec.name}: registered as role {src.role!r}, config says {role!r}")
+
+    ir_dir = _ir_dir(src, spec.precision, out_root)
+    started = datetime.now(UTC)
+    if (ir_dir / IR_XML_NAME).exists() and not overwrite:
+        log.info("convert.skip_existing", model=src.name, ir_dir=str(ir_dir))
+    else:
+        snapshot = snapshot_dir(src)
+        _checked_embedding(src, snapshot)
+        _CONVERTERS[src.kind](src, spec.precision, out_root)
+        log.info(
+            "convert.done",
+            model=src.name,
+            precision=spec.precision,
+            ir_dir=str(ir_dir),
+            seconds=round((datetime.now(UTC) - started).total_seconds(), 1),
+        )
+
+    bin_path = ir_dir / IR_BIN_NAME
+    return {
+        "role": src.role,
+        "hf_id": src.hf_id,
+        "hf_revision": src.hf_revision,
+        "precision": spec.precision,
+        "ir_dir": _relative_to_manifest(ir_dir),
+        "ir_sha256": file_sha256(bin_path) if bin_path.exists() else "",
+        "ov_version": ov_version(),
+        "converted_at": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        **({"embedding": dict(src.embedding)} if src.embedding else {}),
+    }
+
+
+def _relative_to_manifest(ir_dir: Path, manifest_path: Path = MANIFEST_PATH) -> str:
+    """Manifest paths are relative to the manifest file, so the tree can be relocated."""
+    base = manifest_path.resolve().parent
+    try:
+        return str(ir_dir.resolve().relative_to(base))
+    except ValueError:
+        return str(ir_dir.resolve())
+
+
+def write_manifest(
+    entries: dict[str, dict[str, Any]],
+    path: Path = MANIFEST_PATH,
+) -> Path:
+    """Merge into the existing manifest — converting one model must not drop the others."""
+    existing: dict[str, Any] = {}
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text()).get("models", {})
+        except json.JSONDecodeError:
+            log.warning("convert.manifest_unreadable_rewriting", path=str(path))
+    merged = {**existing, **entries}
+    payload = {
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "generated_by": "models/convert.py",
+        "ov_version": ov_version(),
+        "models": dict(sorted(merged.items())),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n")
+    log.info("convert.manifest_written", path=str(path), models=sorted(merged))
+    return path
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="HF/Paddle -> OpenVINO IR (ARCHITECTURE.md §7.3)")
+    ap.add_argument("--config", default="configs/base.yaml")
+    ap.add_argument("--only", action="append", default=None, help=f"role or name; {ROLES}")
+    ap.add_argument("--all", action="store_true")
+    ap.add_argument("--out-root", type=Path, default=IR_ROOT)
+    ap.add_argument("--manifest", type=Path, default=MANIFEST_PATH)
+    ap.add_argument("--overwrite", action="store_true")
+    args = ap.parse_args(argv)
+
+    cfg = load_config(args.config)
+    targets = list(args.only or []) or (list(ROLES) if args.all else [])
+    if not targets:
+        ap.error("pass --only <role|name> (repeatable) or --all")
+
+    entries: dict[str, dict[str, Any]] = {}
+    failures: list[str] = []
+    for target in targets:
+        try:
+            from models.registry import spec_for
+
+            _, spec = spec_for(target, cfg)
+            entries[spec.name] = convert(
+                target, cfg, out_root=args.out_root, overwrite=args.overwrite
+            )
+        except (ConversionError, RuntimeError, OSError) as e:
+            log.error("convert.failed", target=target, error=str(e))
+            failures.append(f"{target}: {e}")
+
+    if entries:
+        write_manifest(entries, args.manifest)
+    for f in failures:
+        print(f"FAILED {f}")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
