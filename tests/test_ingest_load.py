@@ -308,3 +308,48 @@ def test_a_scan_caches_its_empty_block_list(tmp_path, scanned_pdf):
     )
     assert cache.has(key)
     assert load_pdf(scanned_pdf, "scan.pdf", cache=cache).blocks == []
+
+
+def build_rotated_pdf(rotation: int) -> bytes:
+    """A marker at the top-left of the unrotated page, plus filler to clear the text threshold."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=A4[0], height=A4[1])
+    page.insert_textbox(
+        pymupdf.Rect(60, 60, 350, 100), "TOPLEFT MARKER", fontsize=14, fontname="helv"
+    )
+    page.insert_textbox(
+        pymupdf.Rect(60, 400, 500, 700),
+        "Filler body text so this page clears the text-layer threshold. " * 4,
+        fontsize=11,
+        fontname="helv",
+    )
+    page.set_rotation(rotation)
+    return doc.tobytes()
+
+
+@pytest.mark.parametrize(
+    ("rotation", "corner"),
+    [(0, "top-left"), (90, "top-right"), (180, "bottom-right"), (270, "bottom-left")],
+)
+def test_page_rotation_moves_the_bbox_to_the_displayed_corner(rotation, corner):
+    """`get_text` reports unrotated coordinates while `page.rect` is rotated.
+
+    Left uncorrected, a /Rotate 180 page cites the opposite corner and the bbox still passes
+    schema validation — a wrong citation that looks entirely healthy.
+    """
+    blocks = load_pdf(build_rotated_pdf(rotation), "r.pdf").blocks
+    x0, y0, x1, y1 = next(b for b in blocks if "TOPLEFT" in b.text).bbox
+    left, top = x0 < 0.5, y0 < 0.5
+    assert (("top" if top else "bottom") + "-" + ("left" if left else "right")) == corner
+    assert 0.0 <= x0 <= x1 <= 1.0
+    assert 0.0 <= y0 <= y1 <= 1.0
+
+
+def test_an_upright_page_is_unaffected_by_the_rotation_correction():
+    upright = load_pdf(build_rotated_pdf(0), "r.pdf").blocks
+    assert [b.bbox for b in upright] == [
+        b.bbox for b in load_pdf(build_rotated_pdf(0), "r.pdf").blocks
+    ]
+    marker = next(b for b in upright if "TOPLEFT" in b.text)
+    assert marker.bbox[0] == pytest.approx(0.101, abs=0.01)
+    assert marker.bbox[1] == pytest.approx(0.071, abs=0.01)

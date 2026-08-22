@@ -32,3 +32,33 @@ Next: `models/convert.py` + `models/registry.py` with device fallback (§8 Block
 
 Blockers raised: hardware is Apple M4 Pro, not Intel i5/Iris Xe — `available_devices == ['CPU']`,
 so the CPU-vs-GPU slide cannot be produced here. See BLOCKERS.md.
+
+## 2026-08-23 00:45 — Blocks 1–3h / 3–6h: wave 1 salvaged and committed
+Done: Four parallel agents (models, ingest, answer, telemetry) each wrote their files and then
+**all four were killed by a session limit at the reporting step** — after their code had landed.
+Nothing was rebuilt. The lead verified, formatted, fixed one E501 and one blind-`except` lint,
+and committed as `54020ed`.
+
+Landed: `models/registry.py` (device fallback + §3.1 fingerprint + `verify_fingerprint` that
+raises), `models/convert.py`, `scripts/setup.py`, `core/cache.py` (root injected — nothing under
+`core/` knows about `data/`), `ingest/load.py` (text-layer detection so OCR is skipped),
+`ingest/normalize.py`, `ingest/chunk.py`, `answer/prompt.py`, `answer/cite.py`,
+`answer/sources/online.py` (stays a `NotImplementedError` stub per §9 Tier 2),
+`core/telemetry.py`, `eval/bench.py`.
+
+Verified: `uv run pytest -q` → **408 passed**. ruff clean, `uv lock --check` ok.
+**BGE-M3 was really converted to INT8 OpenVINO IR and loads:**
+
+```
+model.device_unavailable  available=['CPU'] requested=GPU falling_back_to=CPU
+model.loaded  model=bge-m3 device=CPU fell_back=True precision=int8 cached=True
+loaded in 0.5s | inputs [input_ids, attention_mask] | outputs last_hidden_state [?,?,1024]
+```
+
+Device fallback works and logs honestly, which is the §7.4 requirement.
+
+Next: wave 2 respun — `indexer` (embed/index/pipeline), `searcher` (dense/fusion),
+`ocrsmith` (ingest/ocr.py — the one stage nobody had), `generatorsmith` (generate/ui).
+
+Known debt: `eval/bench.py` is 565 lines, over CLAUDE.md's 500-line limit. Split it when touched.
+`models/manifest.json` holds only `bge-m3`; the Qwen3-4B INT4 generator is not converted yet.

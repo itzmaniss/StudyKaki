@@ -113,11 +113,20 @@ def _open(data: bytes) -> pymupdf.Document:
         raise CorruptDocumentError(f"pymupdf could not open the document: {exc}") from exc
 
 
-def _normalise_bbox(rect: pymupdf.Rect, page_rect: pymupdf.Rect) -> BBox:
+def _normalise_bbox(rect: pymupdf.Rect, page: pymupdf.Page) -> BBox:
+    """Text coordinates into the 0-1 space of the page *as displayed*.
+
+    `get_text` reports coordinates in unrotated page space while `page.rect` is the rotated
+    rect, so on a `/Rotate 180` page the two disagree and an uncorrected bbox highlights the
+    opposite corner — a citation pointing at the wrong part of the page. `rotation_matrix`
+    maps one into the other and is the identity when the page is upright.
+    """
+    page_rect = page.rect
+    placed = rect * page.rotation_matrix
     width = page_rect.width or 1.0
     height = page_rect.height or 1.0
-    xs = sorted(((rect.x0 - page_rect.x0) / width, (rect.x1 - page_rect.x0) / width))
-    ys = sorted(((rect.y0 - page_rect.y0) / height, (rect.y1 - page_rect.y0) / height))
+    xs = sorted(((placed.x0 - page_rect.x0) / width, (placed.x1 - page_rect.x0) / width))
+    ys = sorted(((placed.y0 - page_rect.y0) / height, (placed.y1 - page_rect.y0) / height))
     x0, y0, x1, y1 = (min(1.0, max(0.0, v)) for v in (xs[0], ys[0], xs[1], ys[1]))
     return (x0, y0, x1, y1)
 
@@ -223,7 +232,7 @@ def _extract_blocks(doc: pymupdf.Document, doc_id: str) -> list[Block]:
                 (
                     _Candidate(
                         page=page.number + 1,
-                        rect=_normalise_bbox(rect, page_rect),
+                        rect=_normalise_bbox(rect, page),
                         text=text,
                         size=size,
                         bold_ratio=bold_ratio,
