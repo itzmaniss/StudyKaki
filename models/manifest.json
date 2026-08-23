@@ -3,6 +3,26 @@
   "generated_by": "models/convert.py",
   "ov_version": "2026.3.0",
   "models": {
+    "PP-OCRv5_mobile_det": {
+      "role": "ocr_det",
+      "hf_id": "PaddlePaddle/PP-OCRv5_mobile_det",
+      "hf_revision": "0d63e78e2b680928f6b1747d76a08db6e645efb7",
+      "precision": "int8",
+      "ir_dir": "ir/PP-OCRv5_mobile_det-int8",
+      "ir_sha256": "e5af6623769c9c46329a7597044f4f41e78ca2f313bce3fdfd516afc457ac43e",
+      "ov_version": "2026.3.0",
+      "converted_at": "2026-08-23T16:17:12Z"
+    },
+    "PP-OCRv5_mobile_rec": {
+      "role": "ocr_rec",
+      "hf_id": "PaddlePaddle/PP-OCRv5_mobile_rec",
+      "hf_revision": "682f20538d8c086cb2128e5cfac775e6c4904e85",
+      "precision": "int8",
+      "ir_dir": "ir/PP-OCRv5_mobile_rec-int8",
+      "ir_sha256": "8e69670370ac2fb8c994077b69603fa874bcc107b53872623c6a3eba77923a5b",
+      "ov_version": "2026.3.0",
+      "converted_at": "2026-08-23T16:16:28Z"
+    },
     "bge-m3": {
       "role": "embedder",
       "hf_id": "BAAI/bge-m3",

@@ -197,3 +197,36 @@ Threshold caveat: the fused-token control sample is small (hand-built Tamil with
 technical terms, measuring 0.0) against one real document at 0.304. 0.15 sits well clear of
 both rather than splitting the difference, but it deserves re-checking once real Tamil OCR
 output exists to compare against.
+
+---
+
+## 6. §6 names two models that cannot be used as written
+
+**`PP-OCRv6_mobile_det` does not exist.** `configs/base.yaml` in §6 names it, but
+`PaddlePaddle/PP-OCRv6_*` returns 401 on the HF API — there is no public v6 checkpoint. v5
+mobile is the newest released and is what PaddleOCR itself ships. `configs/base.yaml` now
+reads `PP-OCRv5_mobile_det`, with the reason inline. §6 names `PP-OCRv5_mobile_rec` for the
+recogniser already, so only the detector deviates.
+
+**PaddlePaddle 3.0 broke OpenVINO's Paddle frontend.** §7 assumes OpenVINO reads Paddle
+inference models natively. It no longer can: every PaddlePaddle HF repo — v4 mobile as well
+as v5 — now ships a PIR program (`inference.json`, `{"magic":"pir"}`) instead of the legacy
+protobuf `.pdmodel`. OpenVINO 2026.3 fails on it with the unhelpful `Cannot recognize input
+model.` There is no `.pdmodel` left to fall back to.
+
+Resolved by routing PIR through Paddle's own exporter: **PIR → ONNX → OpenVINO IR → INT8**.
+The alternative was a community ONNX re-upload from HF; several exist, all with 0 downloads
+and no provenance, and §3.1 makes model identity a hard requirement, so the official
+converter won despite its cost.
+
+That cost is three new dependencies — `paddle2onnx`, `paddlepaddle`, `setuptools`
+(paddle2onnx imports it at runtime and does not declare it). They are **conversion-time only**,
+like `torch`, `nncf` and `optimum-intel` already are; nothing under `ingest/`, `retrieve/` or
+`answer/` imports them. `paddlepaddle` is ~100 MB, so `uv sync` is heavier now. If that
+matters for the Intel laptop, moving all conversion-time deps into a `[dependency-groups]
+convert` group is a clean follow-up — I did not do it because §0.1 keeps `nncf` and
+`optimum-intel` in the main dependency list and I matched that convention.
+
+Verified working: both models convert, load through `models/registry.py`, and fall back to
+CPU with the right shapes — det `[?,3,?,?] -> [?,1,32..,32..]`, rec `[?,3,48,?] -> [?,1..,18385]`.
+The 18385-class head is PP-OCRv5's multilingual charset, which is what Tamil needs.

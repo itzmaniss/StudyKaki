@@ -5,7 +5,10 @@
 # honest about intent even on hardware with no GPU plugin. See BLOCKERS.md.
 
 models:
-  ocr_det:   { name: PP-OCRv6_mobile_det, device: GPU, precision: int8 }
+  # §6 names PP-OCRv6_mobile_det. No such public checkpoint exists — PaddlePaddle/PP-OCRv6_*
+  # returns 401 on the HF API. v5 mobile is the newest released and is what PaddleOCR ships.
+  # Deviation from the contract, recorded in BLOCKERS.md #6.
+  ocr_det:   { name: PP-OCRv5_mobile_det, device: GPU, precision: int8 }
   ocr_rec:   { name: PP-OCRv5_mobile_rec, device: GPU, precision: int8 }
   embedder:  { name: bge-m3,              device: GPU, precision: int8 }
   generator: { name: qwen3-4b-instruct,   device: CPU, precision: int4 }

@@ -50,6 +50,10 @@ IR_ROOT = Path(__file__).resolve().parent / "ir"
 TOKENIZER_XML_NAME = "openvino_tokenizer.xml"
 DETOKENIZER_XML_NAME = "openvino_detokenizer.xml"
 
+# Paddle's PIR exporter targets ONNX; 14 covers every op PP-OCR mobile uses and keeps the
+# graph readable by OpenVINO's ONNX frontend without opset-upgrade churn.
+PADDLE_ONNX_OPSET = 14
+
 Kind = Literal["hf_encoder", "hf_causal_lm", "paddle"]
 
 
@@ -315,8 +319,48 @@ def convert_causal_lm(src: ModelSource, precision: str, out_root: Path) -> Path:
     return ir_dir
 
 
+def _is_pir(model_file: Path) -> bool:
+    """PaddlePaddle 3.0 replaced the protobuf `.pdmodel` with a JSON PIR program.
+
+    OpenVINO's Paddle frontend reads the legacy protobuf only; handed a PIR file it fails with
+    the unhelpful "Cannot recognize input model." Every PaddlePaddle HF repo now ships PIR —
+    v4 mobile as well as v5 — so this is the normal path, not the exception.
+    """
+    if model_file.suffix != ".json":
+        return False
+    with model_file.open("rb") as fh:
+        return b'"magic":"pir"' in fh.read(256).replace(b" ", b"")
+
+
+def _pir_to_onnx(model_file: Path, params_file: Path, dest: Path) -> Path:
+    """PIR -> ONNX via Paddle's own exporter, so provenance stays with PaddlePaddle.
+
+    The alternative was a community ONNX re-upload; §3.1 makes model identity a hard
+    requirement and those repos are unvetted, so the official converter wins even though it
+    drags in the paddlepaddle runtime at conversion time.
+    """
+    try:
+        import paddle2onnx
+    except ImportError as exc:  # pragma: no cover - dependency is declared
+        raise ConversionError(
+            "paddle2onnx is required to convert PIR-format Paddle models; run `uv sync`"
+        ) from exc
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    paddle2onnx.export(
+        model_filename=str(model_file),
+        params_filename=str(params_file),
+        save_file=str(dest),
+        opset_version=PADDLE_ONNX_OPSET,
+        auto_upgrade_opset=True,
+    )
+    if not dest.exists():
+        raise ConversionError(f"paddle2onnx reported success but {dest} was not written")
+    return dest
+
+
 def convert_paddle(src: ModelSource, precision: str, out_root: Path) -> Path:
-    """PaddleOCR mobile det/rec — OpenVINO reads Paddle inference models natively."""
+    """PaddleOCR mobile det/rec. PIR models route through ONNX; legacy ones go direct."""
     snapshot = snapshot_dir(src)
     candidates = [snapshot / "inference.json", snapshot / "inference.pdmodel"]
     model_file = next((c for c in candidates if c.exists()), None)
@@ -325,6 +369,14 @@ def convert_paddle(src: ModelSource, precision: str, out_root: Path) -> Path:
             f"{src.name}: no Paddle inference model in {snapshot} "
             f"(looked for {', '.join(c.name for c in candidates)})"
         )
+
+    if _is_pir(model_file):
+        params = snapshot / "inference.pdiparams"
+        if not params.exists():
+            raise ConversionError(f"{src.name}: PIR model at {model_file} has no {params.name}")
+        onnx_path = _ir_dir(src, precision, out_root) / f"{src.name}.onnx"
+        log.info("convert.paddle_pir", model=src.name, source=str(model_file), via="onnx")
+        model_file = _pir_to_onnx(model_file, params, onnx_path)
 
     log.info("convert.paddle", model=src.name, source=str(model_file))
     ov_model = ov.convert_model(model_file)
