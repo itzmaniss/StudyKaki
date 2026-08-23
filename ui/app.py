@@ -22,6 +22,7 @@ actually changed it, so the common case shows one answer, not two.
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 from collections.abc import Iterable, Sequence
@@ -217,6 +218,10 @@ class Session:
     style: Style = field(default_factory=Style)
     tier3_enabled: bool = False
     show_trace: bool = False
+    #: Echo tokens as they arrive. Off, only verified text is ever printed — a raw draft can
+    #: carry a citation marker that `answer/cite.py` is about to remove, which is worth
+    #: trading TTFT away for when the screen is being recorded.
+    stream_draft: bool = True
 
     def ask(self, question: str, out: TextIO) -> AnswerResult:
         stream = stream_answer(
@@ -230,9 +235,10 @@ class Session:
         parts: list[str] = []
         for delta in stream:
             parts.append(delta)
-            out.write(delta)
-            out.flush()
-        if parts:
+            if self.stream_draft:
+                out.write(delta)
+                out.flush()
+        if parts and self.stream_draft:
             out.write("\n")
         result = stream.result
         out.write(
@@ -241,7 +247,7 @@ class Session:
                 registry=self.registry,
                 style=self.style,
                 tier3_enabled=self.tier3_enabled,
-                streamed="".join(parts),
+                streamed="".join(parts) if self.stream_draft else None,
                 show_trace=self.show_trace,
             )
             + "\n"
@@ -317,6 +323,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--trace", action="store_true", help="print a telemetry line per answer")
     parser.add_argument("--no-color", action="store_true")
+    parser.add_argument(
+        "--no-stream", action="store_true", help="print only verified answers, never the draft"
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="stage logs on stderr")
     return parser
 
 
@@ -324,6 +334,20 @@ def colour_enabled(no_color: bool, out: TextIO) -> bool:
     if no_color or os.environ.get("NO_COLOR"):
         return False
     return bool(getattr(out, "isatty", lambda: False)())
+
+
+def configure_logging(verbose: bool = False) -> None:
+    """Send `structlog` to stderr and quieten it — here, stdout is the answer.
+
+    Called from `main()` and nowhere else: importing this module must not reconfigure
+    logging for `eval/run.py` or the ingest pipeline, whose stdout is not a display.
+    """
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(
+            logging.INFO if verbose else logging.WARNING
+        ),
+        logger_factory=structlog.WriteLoggerFactory(file=sys.stderr),
+    )
 
 
 def build_session(args: argparse.Namespace, *, out: TextIO) -> Session:
@@ -340,12 +364,14 @@ def build_session(args: argparse.Namespace, *, out: TextIO) -> Session:
         style=Style(enabled=colour_enabled(args.no_color, out)),
         tier3_enabled=args.tier3,
         show_trace=args.trace,
+        stream_draft=not args.no_stream,
     )
 
 
 def main(argv: Sequence[str] | None = None, *, out: TextIO | None = None) -> int:
     out = out or sys.stdout
     args = build_parser().parse_args(argv)
+    configure_logging(args.verbose)
     try:
         session = build_session(args, out=out)
     except (OSError, RuntimeError, ValueError) as exc:

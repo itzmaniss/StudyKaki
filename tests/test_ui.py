@@ -12,6 +12,7 @@ import io
 
 import pymupdf
 import pytest
+import structlog
 
 from answer.cite import find_markers
 from answer.generate import generate_answer
@@ -27,6 +28,7 @@ from ui.app import (
     Style,
     build_parser,
     citation_lines,
+    configure_logging,
     handle_command,
     main,
     render_result,
@@ -85,6 +87,13 @@ def cfg(tmp_path):
             "paths": PathsConfig(data_dir=tmp_path / "data", ov_cache_dir=tmp_path / "ov_cache")
         }
     )
+
+
+@pytest.fixture
+def reset_logging():
+    """`configure_logging` is global; hand structlog back as it was found."""
+    yield
+    structlog.reset_defaults()
 
 
 @pytest.fixture
@@ -340,7 +349,26 @@ def test_a_failed_answer_does_not_kill_the_session(cfg, hits):
     assert "index went away" in out.getvalue()
 
 
+def test_the_draft_can_be_suppressed_so_only_verified_text_is_printed(cfg, hits):
+    """A raw delta can carry a marker `answer/cite.py` is about to remove; --no-stream waits."""
+    session, out = session_for(cfg, hits, ["answer [1] and [99]"], stream_draft=False)
+    session.ask("q", out)
+    assert find_markers(out.getvalue()) == [1, 1]  # the answer, then its source line
+    assert "corrected" not in out.getvalue()
+
+
 # --- entry point ----------------------------------------------------------------------------
+
+
+def test_logs_go_to_stderr_so_they_never_break_the_answer(capsys, reset_logging):
+    configure_logging(verbose=False)
+    log = structlog.get_logger("test.ui")
+    log.info("ui.noisy_stage_log")
+    log.warning("ui.something_wrong")
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "ui.noisy_stage_log" not in captured.err
+    assert "ui.something_wrong" in captured.err
 
 
 def test_tier3_defaults_to_off_on_the_command_line():
