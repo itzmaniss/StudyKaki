@@ -8,6 +8,8 @@ import pytest
 from core.cache import CacheKey, StageCache
 from core.schema import BLOCK_KINDS, Document
 from ingest.load import (
+    LEGACY_ENCODING_MAX_RATIO,
+    MIXED_SCRIPT_TOKEN_MAX_RATIO,
     PDF_MIME,
     STAGE_VERSION,
     CorruptDocumentError,
@@ -15,9 +17,12 @@ from ingest.load import (
     LoadResult,
     UnsupportedMimeError,
     doc_id_for,
+    legacy_encoding_ratio,
     load_path,
     load_pdf,
+    mixed_script_token_ratio,
     render_pages,
+    text_layer_is_trustworthy,
 )
 
 A4 = (595, 842)
@@ -353,3 +358,92 @@ def test_an_upright_page_is_unaffected_by_the_rotation_correction():
     marker = next(b for b in upright if "TOPLEFT" in b.text)
     assert marker.bbox[0] == pytest.approx(0.101, abs=0.01)
     assert marker.bbox[1] == pytest.approx(0.071, abs=0.01)
+
+
+class TestTextLayerValidity:
+    """A text layer that exists but does not decode is worse than none — BLOCKERS.md #5.
+
+    Legacy 8-bit Indic font encodings put correct glyphs on the page while `get_text` returns
+    Latin-1 noise. Trusting presence alone skips OCR and indexes mojibake, and nothing raises.
+    """
+
+    # Real extraction from data/corpus/ta/std12_cs_vol1_ta.pdf p61 (TAM_ELANGO_Abirami font).
+    TSCII = "x ²ì¢® êó¤ò£ù Þìî¢î¤ô¢ Þ¼ï¢î£ô¢ Üï¢îê¢ ²ì¢® Þ¼î¬ô ªè£í¢ì Üñ¢¹è¢ °ø¤«ð£ô¢"
+    # Real extraction from data/corpus/ta/digital_electronics_ta.pdf — decoded *partially*.
+    PARTIAL = "இ¯நிைல எzகள} ெப¯tக பதி}ம எzகைள ெப¯tவ¢ ேபாலேவ இ|தt கணtகீyைட ெசய «­"
+
+    def test_legacy_encoded_tamil_is_rejected(self):
+        assert legacy_encoding_ratio(self.TSCII) > LEGACY_ENCODING_MAX_RATIO
+        assert not text_layer_is_trustworthy(self.TSCII)
+
+    def test_partially_decoded_layer_is_rejected(self):
+        """Real Tamil codepoints, but Latin fused inside words — the ratio test waves it through."""
+        assert legacy_encoding_ratio(self.PARTIAL) == 0.0, "real script present, so ratio abstains"
+        assert mixed_script_token_ratio(self.PARTIAL) > MIXED_SCRIPT_TOKEN_MAX_RATIO
+        assert not text_layer_is_trustworthy(self.PARTIAL)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "The quick brown fox jumps over the lazy dog repeatedly.",
+            "Le système éducatif français a été créé en 1802 à Paris.",
+            "Die Universität in Köln wurde für Studenten größer gemacht.",
+            "ஒளிச்சேர்க்கை என்பது photosynthesis ஆகும். RAM மற்றும் ROM நினைவகம்.",
+            "光合作用是植物利用光能的过程，发生在叶绿体中。",
+            "日本のIPv6普及率は2021年に60%を超えました。",
+        ],
+    )
+    def test_genuine_text_is_trusted(self, text):
+        assert text_layer_is_trustworthy(text)
+
+    def test_no_space_scripts_are_exempt_from_the_fused_test(self):
+        """CJK is not space-delimited, so "IPv6 部署" is one token and must not read as fused.
+
+        Without the exemption the Chinese corpus (full of IPv4/IPv6/5G) is rejected wholesale.
+        """
+        zh = "截至2021年12月，我国IPv6地址数量为63052块/32，IPv4为39159万个。5G基站达142.5万个。"
+        assert mixed_script_token_ratio(zh) == 0.0
+        assert text_layer_is_trustworthy(zh)
+
+    def test_empty_text_does_not_divide_by_zero(self):
+        assert legacy_encoding_ratio("") == 0.0
+        assert legacy_encoding_ratio("   \n\t ") == 0.0
+        assert mixed_script_token_ratio("") == 0.0
+
+    def test_accented_latin_stays_well_under_the_threshold(self):
+        """Guards the threshold from below: accented prose must never trip the legacy test."""
+        french = "Le système éducatif français a été créé en 1802 à Paris."
+        assert legacy_encoding_ratio(french) < LEGACY_ENCODING_MAX_RATIO
+
+    def test_mojibake_document_falls_back_to_ocr(self):
+        """End to end: a PDF whose text layer is mojibake reports has_text_layer=False."""
+        doc = pymupdf.open()
+        for _ in range(3):
+            page = doc.new_page()
+            page.insert_text((72, 100), self.TSCII, fontsize=11)
+            page.insert_text((72, 130), self.TSCII, fontsize=11)
+        data = doc.tobytes()
+        doc.close()
+
+        result = load_pdf(data, "mojibake.pdf")
+        assert not result.document.has_text_layer, "mojibake must not be trusted as a text layer"
+        assert result.blocks == [], (
+            "rejecting the layer must drop its blocks (LoadResult invariant)"
+        )
+
+    def test_clean_document_keeps_its_text_layer(self):
+        doc = pymupdf.open()
+        for _ in range(3):
+            page = doc.new_page()
+            page.insert_text(
+                (72, 100), "Photosynthesis converts light into chemical energy.", fontsize=11
+            )
+            page.insert_text(
+                (72, 130), "Chlorophyll absorbs blue and red light most strongly.", fontsize=11
+            )
+        data = doc.tobytes()
+        doc.close()
+
+        result = load_pdf(data, "clean.pdf")
+        assert result.document.has_text_layer
+        assert result.blocks

@@ -156,3 +156,44 @@ open Tamil-confidence question (0.4–0.6 on correct output) can at last be cali
 pages rather than guessed.
 
 **Blocked on:** nothing else. English (471pp) is usable for a baseline right now.
+
+### #5 RESOLVED — text-layer validity check implemented (approved option (a))
+
+`ingest/load.py` now checks whether a text layer *decodes*, not merely whether it exists.
+Two independent signals, both measured against the real corpus:
+
+| Signal | Catches | Threshold |
+|---|---|---|
+| `legacy_encoding_ratio` | wholly mis-decoded 8-bit text (TSCII/TAB, CP1252) | > 0.25 rejects |
+| `mixed_script_token_ratio` | *partially* decoded layers — Latin fused inside words | > 0.15 rejects |
+
+Measured (50-page samples):
+
+```
+Tamil vol1 (TSCII)      legacy=0.724 fused=0.000 -> REJECTED, OCR
+Tamil vol2 (TSCII)      legacy=0.555 fused=0.000 -> REJECTED, OCR
+DigitalElec (partial)   legacy=0.000 fused=0.304 -> REJECTED, OCR
+English vol1/vol2       legacy≤0.009 fused=0.000 -> trusted
+CNNIC / ITU zh / ITU en legacy≤0.002 fused=0.000 -> trusted
+```
+
+Two findings worth recording:
+
+1. **A codepoint floor is the wrong test.** The first implementation trusted any text containing
+   a codepoint above U+0590. Mis-decoded CP1252 emits `™` (U+2122) and `›` (U+203A), which sit
+   *above* that floor, so mojibake read as proof of a real script — exactly backwards. Real
+   script blocks are now enumerated explicitly.
+2. **`digital_electronics_ta.pdf` is a third failure mode**, not caught by the ratio test at all:
+   the layer decodes *partially*, giving real Tamil codepoints with Latin fall-through fused
+   inside words (`எzகள}`). The ratio test abstains because real script is present. The
+   fused-token signal catches it at 0.304.
+
+**The fused-token test is deliberately restricted to space-delimited scripts.** CJK and Thai are
+not written with spaces, so an ordinary CNNIC line like `我国IPv6地址数量` is one token and
+would read as fused. Without that exemption the entire Chinese corpus is rejected wholesale —
+verified as a test.
+
+Threshold caveat: the fused-token control sample is small (hand-built Tamil with English
+technical terms, measuring 0.0) against one real document at 0.304. 0.15 sits well clear of
+both rather than splitting the difference, but it deserves re-checking once real Tamil OCR
+output exists to compare against.

@@ -84,6 +84,26 @@ SOURCES: tuple[Source, ...] = (
         _archive("std12cs2em2006tnbooks", "std12cs2em2006tnbooks.pdf"),
         "Std12 Computer Science Vol 2, English medium — parallel to std12_cs_vol2_ta",
     ),
+    Source(
+        "cnnic_internet_report",
+        "zh",
+        "https://www.cnnic.net.cn/NMediaFile/2023/0807/MAIN1691372884990HDTP1QOST8.pdf",
+        "CNNIC 中国互联网络发展状况统计报告 — dense IPv4/IPv6 and broadband tables",
+    ),
+    # ITU publishes the same document per UN language, suffixed -C (Chinese) and -E (English),
+    # which makes them a second parallel pair for cross-lingual questions.
+    Source(
+        "itu_wtdc22_zh",
+        "zh",
+        "https://www.itu.int/dms_pub/itu-d/opb/tdc/D-TDC-WTDC-2022-PDF-C.pdf",
+        "ITU WTDC-22 Final Report, Chinese — parallel to itu_wtdc22_en",
+    ),
+    Source(
+        "itu_wtdc22_en",
+        "en",
+        "https://www.itu.int/dms_pub/itu-d/opb/tdc/D-TDC-WTDC-2022-PDF-E.pdf",
+        "ITU WTDC-22 Final Report, English — parallel to itu_wtdc22_zh",
+    ),
 )
 
 
