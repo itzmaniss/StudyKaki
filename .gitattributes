@@ -1,0 +1,9 @@
+# The eval corpus lives on the `testing` branch, tracked with LFS. `main` carries no PDFs, so
+# this file is inert there — it exists on both branches so the two never diverge on it and
+# merges stay clean.
+#
+# Corpus bytes are pinned deliberately, not just cached: `doc_id` is the sha256 of the file
+# (core/schema.py), and `eval/golden.jsonl` labels are keyed on `doc_id`. If a re-download
+# differs by a single byte, every gold label silently stops matching. Pinning the bytes is
+# what makes eval numbers comparable across machines and across time.
+*.pdf filter=lfs diff=lfs merge=lfs -text
