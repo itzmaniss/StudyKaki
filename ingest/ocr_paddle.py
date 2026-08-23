@@ -30,6 +30,10 @@ from ingest.ocr import DEFAULT_SCRIPT, DetBox, OcrModelError, OcrParams, RecResu
 
 log = structlog.get_logger(__name__)
 
+# INT8 softmax rows drift a few percent off 1.0 (measured 1.026). Wide enough to absorb that,
+# far tighter than any logit row sum, which is unbounded and routinely negative.
+PROBABILITY_SUM_TOLERANCE = 0.1
+
 # ImageNet constants applied, as upstream does, to a **BGR** array — see `_preprocess`.
 _DET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _DET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -327,10 +331,21 @@ class PaddleTextRecognizer:
             raise OcrModelError(f"recognition inference failed: {exc}") from exc
         if probs.ndim != 3:
             raise OcrModelError(f"recogniser produced shape {probs.shape}, expected [N,T,C]")
-        # PaddleOCR's exported rec graph ends in softmax and its confidences are read
-        # straight off the output. An IR exported without it would otherwise report logits
-        # as probabilities, which reads as a systematic confidence collapse.
-        if not np.allclose(probs.sum(axis=-1), 1.0, atol=1e-2):
+        # PaddleOCR's exported rec graph ends in softmax and its confidences are read straight
+        # off the output. An IR exported without it would report logits as probabilities, so
+        # softmax is applied only when the output is *not* already a distribution.
+        #
+        # The test is deliberately loose. INT8 weight compression pushes the row sums off 1.0
+        # by a few percent — measured up to 1.026 on PP-OCRv5_mobile_rec — and a tight
+        # tolerance (1e-2) reads that drift as "these are logits" and softmaxes a second time.
+        # Re-softmaxing values already in [0,1] flattens them to near-uniform: peak probability
+        # collapses from 0.97 to 1.4e-4, every confidence rounds to 0.00, and `min_confidence`
+        # then drops every block on the page. The stage returns zero blocks and raises nothing.
+        # Logits are separable on sign and magnitude, not on a hair's-width sum, so test both.
+        looks_like_probabilities = probs.min() >= 0.0 and np.allclose(
+            probs.sum(axis=-1), 1.0, atol=PROBABILITY_SUM_TOLERANCE
+        )
+        if not looks_like_probabilities:
             shifted = probs - probs.max(axis=-1, keepdims=True)
             exp = np.exp(shifted)
             probs = exp / exp.sum(axis=-1, keepdims=True)

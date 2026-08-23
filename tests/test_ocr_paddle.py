@@ -162,3 +162,57 @@ def test_a_charset_that_does_not_match_the_ir_is_refused(tmp_path):
 def test_a_missing_charset_names_the_setup_command(tmp_path):
     with pytest.raises(OcrModelError, match="scripts.setup"):
         load_charset(tmp_path)
+
+
+class TestSoftmaxDetection:
+    """Regression: INT8 rounding must not be mistaken for logits.
+
+    PaddleOCR's exported rec graph already ends in softmax. INT8 weight compression pushes the
+    row sums a few percent off 1.0 — measured at 1.026 on PP-OCRv5_mobile_rec. A tight
+    tolerance reads that as "these are logits" and softmaxes a second time, flattening a real
+    distribution to near-uniform: peak probability fell 0.97 -> 1.4e-4, every confidence
+    rounded to 0.00, `min_confidence` dropped every block, and the stage returned zero blocks
+    while raising nothing. The whole OCR suite stayed green throughout, because every test
+    used a fake whose rows summed to exactly 1.0.
+    """
+
+    @staticmethod
+    def _rec(compiled, charset=("<blank>", "a", "b", "c")):
+        return PaddleTextRecognizer(compiled, list(charset), OcrParams(), "rec/fake")
+
+    @staticmethod
+    def _compiled(array):
+        class Compiled:
+            def __call__(self, _inputs):
+                return {0: array}
+
+            def __getitem__(self, _key):
+                return array
+
+        return Compiled()
+
+    def test_int8_drifted_probabilities_are_not_resoftmaxed(self):
+        """Rows summing to 1.026 are probabilities, not logits — confidence must survive."""
+        probs = np.zeros((1, 4, 4), dtype=np.float32)
+        probs[0, :, 1] = 0.996
+        probs[0, :, 0] = 0.030
+        assert np.allclose(probs.sum(axis=-1), 1.026), "fixture must reproduce the measured drift"
+
+        out = self._rec(self._compiled(probs))._infer(np.zeros((1, 3, 48, 320), np.float32))
+        assert out.max() > 0.5, "already-softmaxed rows must pass through untouched"
+
+    def test_genuine_logits_are_softmaxed(self):
+        """The guard must still fire for a graph exported without its softmax."""
+        logits = np.array([[[-4.0, 9.0, -2.0, -3.0]] * 3], dtype=np.float32)
+        out = self._rec(self._compiled(logits))._infer(np.zeros((1, 3, 48, 320), np.float32))
+        assert np.allclose(out.sum(axis=-1), 1.0, atol=1e-4)
+        assert out.max() > 0.9
+
+    def test_confidence_survives_decode(self):
+        """End to end through _decode: a confident row must not report ~0.0."""
+        probs = np.full((1, 3, 4), 0.01, dtype=np.float32)
+        probs[0, :, 1] = 0.97
+        rec = self._rec(self._compiled(probs))
+        results = rec._decode(rec._infer(np.zeros((1, 3, 48, 320), np.float32)))
+        assert results[0].confidence > 0.5, "a 0.97 peak must not collapse to zero"
+        assert results[0].text == "a"
