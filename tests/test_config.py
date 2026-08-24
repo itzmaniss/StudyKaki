@@ -22,7 +22,11 @@ def test_base_config_loads():
     cfg = load_config(DEFAULT_CONFIG)
     assert cfg.chunk.target_tokens == 400
     assert cfg.retrieve.k == 20
-    assert cfg.retrieve.tau == 0.50
+    # tau is a calibrated value, not an architectural one — it has already moved 0.35 -> 0.50
+    # -> 0.45 as the golden set grew, and pinning the literal here just breaks this test on
+    # every retune. §6's structural choices above are pinned; the tuned one is range-checked.
+    assert 0.0 < cfg.retrieve.tau <= 1.0
+    assert cfg.retrieve.n_context <= cfg.retrieve.k
     assert cfg.models.generator.precision == "int4"
 
 
