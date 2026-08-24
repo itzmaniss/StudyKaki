@@ -66,19 +66,50 @@ original text before the reformat.
 
 ---
 
-## 3. `eval/golden.jsonl` is a labelled placeholder, not a gold set
+## 3. `eval/golden.jsonl` — RESOLVED for en/zh, Tamil questions still outstanding
 
-§5 wants 40–60 real questions (10 cross-lingual, 5 unanswerable, 5 table/caption). Real ones need
-the actual corpus, which does not exist in the repo yet. Fabricating 50 plausible-looking
-questions against imaginary documents would produce eval numbers that look real and mean nothing —
-worse than no numbers, given §0.5.
+**Was:** 12 entries tagged `"note": "PLACEHOLDER"` against imaginary documents, because no corpus
+existed. Now `data/corpus/` holds eight real PDFs and the set holds **44 real questions**, every
+answer read off the page it is labelled with before being written down. No PLACEHOLDER remains.
 
-So `eval/golden.jsonl` currently holds **12 entries, every one tagged `"note": "PLACEHOLDER"`** and
-pointing at `PLACEHOLDER_DOC_A` / `PLACEHOLDER_DOC_B`. They exercise every code path in the
-harness (cross-lingual, unanswerable, caption) and nothing else. Grep `PLACEHOLDER` to find them.
+Current composition against §5's target (40–60 / 10 cross-lingual / 5 unanswerable / 5 table):
 
-**Need:** the study PDFs (and which three languages are final). Once a corpus is indexed I can
-draft the real 40–60 against actual page numbers.
+| | have | want |
+|---|---|---|
+| total | 44 | 40–60 |
+| cross-lingual | 8 | 10 |
+| unanswerable | 5 | 5 |
+| table or figure | 7 | 5 |
+| Tamil questions | 0 | — |
+
+**Still needed:** the Tamil half. All three Tamil PDFs reach the index through OCR, so their page
+content is not readable until the OCR pass finishes; questions written before then would be
+labelled against guessed page numbers, which is the exact failure this blocker was raised for.
+Once OCR lands, add ~6 Tamil-language questions and ~4 cross-lingual `en -> digital_electronics_ta`,
+which also takes cross-lingual from 8 to the 10 §5 asks for.
+
+**For the developer:** the labels are my reading of the pages, not verified against an answer key.
+Worth a spot-check on a handful before trusting the absolute numbers — though V2 gating compares
+before/after on the same labels, where a consistent label error largely cancels.
+
+---
+
+## 9. Parallel translations make a single `doc_id` label ambiguous
+
+`GoldQuestion.doc_id` is one document, and `eval/metrics.py:is_relevant` requires
+`hit.chunk.doc_id == gold.doc_id`. But four of the eight corpus documents are parallel
+translations of the other four: `std12_cs_vol1_{ta,en}`, `std12_cs_vol2_{ta,en}`, and
+`itu_wtdc22_{zh,en}` (both 664 pages). A question answerable from either member of a pair has two
+correct answers and one label, so a retriever that returns the translated twin scores 0 for
+being right in the wrong language.
+
+Worked around, not fixed: every cross-lingual question in `golden.jsonl` targets a document that
+exists in **one** language only — the CNNIC report (zh) and the Tamil-only `digital_electronics_ta`.
+Monolingual questions still carry the bias, so absolute recall is understated by an unknown amount.
+
+**Decide:** whether `GoldQuestion` should take `doc_ids: list[str]` (any-of matching) instead. That
+is a change to §5's data shape, so I have not made it. The bias is constant across retrievers, so
+V2 before/after comparisons remain valid either way — this only distorts absolute numbers.
 
 ---
 

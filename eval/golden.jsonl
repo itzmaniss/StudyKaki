@@ -1,16 +1,67 @@
-# PLACEHOLDER SET — structure only, not real labels. See BLOCKERS.md "golden set".
-# Real questions require the actual corpus; §5 wants 40-60 with 10 cross-lingual,
-# 5 unanswerable (gold_pages: []), 5 needing a table/figure caption.
-# Every entry below has note="PLACEHOLDER" so it is greppable and cannot be mistaken for gold.
-{"q": "What is the role of chlorophyll in photosynthesis?", "lang": "en", "doc_id": "PLACEHOLDER_DOC_A", "gold_pages": [42], "note": "PLACEHOLDER"}
-{"q": "Define the light-dependent reactions.", "lang": "en", "doc_id": "PLACEHOLDER_DOC_A", "gold_pages": [43, 44], "note": "PLACEHOLDER"}
-{"q": "Summarise the table of enzyme optimum temperatures.", "lang": "en", "doc_id": "PLACEHOLDER_DOC_A", "gold_pages": [51], "note": "PLACEHOLDER table"}
-{"q": "ஒளிச்சேர்க்கையில் பச்சையத்தின் பங்கு என்ன?", "lang": "ta", "doc_id": "PLACEHOLDER_DOC_A", "gold_pages": [42], "note": "PLACEHOLDER cross-lingual"}
-{"q": "நொதிகளின் உகந்த வெப்பநிலை என்ன?", "lang": "ta", "doc_id": "PLACEHOLDER_DOC_B", "gold_pages": [12], "note": "PLACEHOLDER"}
-{"q": "细胞呼吸的三个阶段是什么？", "lang": "zh", "doc_id": "PLACEHOLDER_DOC_B", "gold_pages": [18, 19], "note": "PLACEHOLDER cross-lingual"}
-{"q": "图 3.2 的标题说明了什么？", "lang": "zh", "doc_id": "PLACEHOLDER_DOC_B", "gold_pages": [20], "note": "PLACEHOLDER caption"}
-{"q": "What does the diagram on the mitochondrion label?", "lang": "en", "doc_id": "PLACEHOLDER_DOC_B", "gold_pages": [21], "note": "PLACEHOLDER caption"}
-{"q": "Who won the 2026 football world cup?", "lang": "en", "doc_id": "PLACEHOLDER_DOC_A", "gold_pages": [], "note": "PLACEHOLDER unanswerable"}
-{"q": "What is my exam timetable for next week?", "lang": "en", "doc_id": "PLACEHOLDER_DOC_A", "gold_pages": [], "note": "PLACEHOLDER unanswerable"}
-{"q": "இந்த புத்தகத்தின் விலை என்ன?", "lang": "ta", "doc_id": "PLACEHOLDER_DOC_B", "gold_pages": [], "note": "PLACEHOLDER unanswerable"}
-{"q": "Explain the Calvin cycle step by step.", "lang": "en", "doc_id": "PLACEHOLDER_DOC_A", "gold_pages": [45, 46], "note": "PLACEHOLDER"}
+# Golden set — ARCHITECTURE.md §5. Real labels against the real corpus (data/corpus/).
+#
+# doc_id is the sha256 of the PDF file (§2). gold_pages are 1-based PDF page numbers, which
+# is what Block.page carries — NOT the printed page number in the page furniture. The Std12
+# textbooks are offset by 8 (PDF p9 = printed p1); the CNNIC report by 10.
+#
+# Every answer below was read off the page it is labelled with before being written down.
+#
+# Composition (§5): 10 cross-lingual, 5 unanswerable (gold_pages: []), 5 needing a table or
+# figure. Cross-lingual questions deliberately target documents that exist in ONE language
+# only — the CNNIC report (zh) and the Tamil-only titles — because std12_cs_* and itu_wtdc22_*
+# ship as parallel translations, and a question answerable from either member of a pair cannot
+# be scored against a single doc_id. See BLOCKERS.md "parallel documents".
+
+# --- std12_cs_vol1_en — StarOffice, monolingual English -------------------------------
+{"q": "In which year did the personal computer first appear?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [67], "note": ""}
+{"q": "How many rows can a StarOffice Calc spreadsheet have?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [68], "note": ""}
+{"q": "What does the & text operator do in StarOffice Calc?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [79], "note": ""}
+{"q": "What is the order of precedence for arithmetic operators in StarOffice Calc?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [80], "note": ""}
+{"q": "Which type of cell addressing does StarOffice Calc use by default?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [85], "note": ""}
+{"q": "What are the two types of page orientation?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [61, 65], "note": ""}
+{"q": "What is the simplest way to add a new row to a table in StarOffice Writer?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [53], "note": ""}
+{"q": "How do I turn on automatic spell checking while typing?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [44, 45], "note": ""}
+{"q": "What does the Merge Cells icon on the table formatting toolbar do?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [56], "note": "figure — toolbar icon legend"}
+{"q": "What is the difference between hard formatting and soft formatting?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [39, 43], "note": ""}
+
+# --- std12_cs_vol2_en — C++, monolingual English --------------------------------------
+{"q": "How many bytes does an int occupy and what is its range?", "lang": "en", "doc_id": "bb47b2c6d11863ff6e437bff75fe5166cd428d76716b659bf5acfc8f313be526", "gold_pages": [46], "note": "table — data type sizes and ranges"}
+{"q": "What is the range of an unsigned char in C++?", "lang": "en", "doc_id": "bb47b2c6d11863ff6e437bff75fe5166cd428d76716b659bf5acfc8f313be526", "gold_pages": [46], "note": "table — data type sizes and ranges"}
+{"q": "What does the address-of operator & do?", "lang": "en", "doc_id": "bb47b2c6d11863ff6e437bff75fe5166cd428d76716b659bf5acfc8f313be526", "gold_pages": [48], "note": ""}
+{"q": "What are the three uses of the asterisk in C++?", "lang": "en", "doc_id": "bb47b2c6d11863ff6e437bff75fe5166cd428d76716b659bf5acfc8f313be526", "gold_pages": [49], "note": ""}
+{"q": "Which punctuator terminates a C++ statement?", "lang": "en", "doc_id": "bb47b2c6d11863ff6e437bff75fe5166cd428d76716b659bf5acfc8f313be526", "gold_pages": [38], "note": "table — punctuators and their purpose"}
+{"q": "What is the extraction operator in C++ and what does it do?", "lang": "en", "doc_id": "bb47b2c6d11863ff6e437bff75fe5166cd428d76716b659bf5acfc8f313be526", "gold_pages": [63], "note": ""}
+{"q": "What are the three primary sections of a C++ program?", "lang": "en", "doc_id": "bb47b2c6d11863ff6e437bff75fe5166cd428d76716b659bf5acfc8f313be526", "gold_pages": [65], "note": ""}
+{"q": "Which operators are unique to C++ compared with ordinary arithmetic?", "lang": "en", "doc_id": "bb47b2c6d11863ff6e437bff75fe5166cd428d76716b659bf5acfc8f313be526", "gold_pages": [27], "note": ""}
+{"q": "How many bytes does a long double require?", "lang": "en", "doc_id": "bb47b2c6d11863ff6e437bff75fe5166cd428d76716b659bf5acfc8f313be526", "gold_pages": [57], "note": "table — sizeof expression results"}
+{"q": "Why is the declaration 'int side, float hypotenuse, area;' erroneous?", "lang": "en", "doc_id": "bb47b2c6d11863ff6e437bff75fe5166cd428d76716b659bf5acfc8f313be526", "gold_pages": [51], "note": ""}
+{"q": "What are the two forms of the if statement?", "lang": "en", "doc_id": "bb47b2c6d11863ff6e437bff75fe5166cd428d76716b659bf5acfc8f313be526", "gold_pages": [69], "note": ""}
+
+# --- cnnic_internet_report — monolingual Chinese --------------------------------------
+{"q": "截至2021年12月，我国网民规模是多少？互联网普及率是多少？", "lang": "zh", "doc_id": "26b49c00db808a746e2b8cd1362b480c39cccb245c35709e6772fc93f3d9560f", "gold_pages": [11, 35], "note": ""}
+{"q": "我国IPv6地址数量是多少？", "lang": "zh", "doc_id": "26b49c00db808a746e2b8cd1362b480c39cccb245c35709e6772fc93f3d9560f", "gold_pages": [17, 18], "note": ""}
+{"q": "“.CN”域名数量占我国域名总数的比例是多少？", "lang": "zh", "doc_id": "26b49c00db808a746e2b8cd1362b480c39cccb245c35709e6772fc93f3d9560f", "gold_pages": [17, 19], "note": ""}
+{"q": "全国光缆线路总长度达到多少万公里？", "lang": "zh", "doc_id": "26b49c00db808a746e2b8cd1362b480c39cccb245c35709e6772fc93f3d9560f", "gold_pages": [22], "note": ""}
+{"q": "我国网页总数是多少？静态网页占比多少？", "lang": "zh", "doc_id": "26b49c00db808a746e2b8cd1362b480c39cccb245c35709e6772fc93f3d9560f", "gold_pages": [24, 25], "note": "table — 表4 网页数量"}
+{"q": "5G移动电话用户数达到多少？", "lang": "zh", "doc_id": "26b49c00db808a746e2b8cd1362b480c39cccb245c35709e6772fc93f3d9560f", "gold_pages": [27], "note": ""}
+{"q": "网民人均每周上网时长是多少小时？", "lang": "zh", "doc_id": "26b49c00db808a746e2b8cd1362b480c39cccb245c35709e6772fc93f3d9560f", "gold_pages": [28, 29], "note": "figure — 图15 网民人均每周上网时长"}
+{"q": "60岁及以上老年网民规模有多大？占网民整体的比例是多少？", "lang": "zh", "doc_id": "26b49c00db808a746e2b8cd1362b480c39cccb245c35709e6772fc93f3d9560f", "gold_pages": [43], "note": ""}
+{"q": "非网民不上网的主要原因是什么？", "lang": "zh", "doc_id": "26b49c00db808a746e2b8cd1362b480c39cccb245c35709e6772fc93f3d9560f", "gold_pages": [40], "note": ""}
+{"q": "即时通信用户规模是多少？", "lang": "zh", "doc_id": "26b49c00db808a746e2b8cd1362b480c39cccb245c35709e6772fc93f3d9560f", "gold_pages": [54], "note": ""}
+
+# --- cross-lingual: English question, Chinese-only document ---------------------------
+{"q": "How many internet users did China have at the end of 2021?", "lang": "en", "doc_id": "26b49c00db808a746e2b8cd1362b480c39cccb245c35709e6772fc93f3d9560f", "gold_pages": [11, 35], "note": "cross-lingual en->zh"}
+{"q": "What proportion of Chinese domain names are .CN domains?", "lang": "en", "doc_id": "26b49c00db808a746e2b8cd1362b480c39cccb245c35709e6772fc93f3d9560f", "gold_pages": [17, 19], "note": "cross-lingual en->zh"}
+{"q": "How many 5G mobile phone subscribers were there in China?", "lang": "en", "doc_id": "26b49c00db808a746e2b8cd1362b480c39cccb245c35709e6772fc93f3d9560f", "gold_pages": [27], "note": "cross-lingual en->zh"}
+{"q": "How many hours per week does the average Chinese internet user spend online?", "lang": "en", "doc_id": "26b49c00db808a746e2b8cd1362b480c39cccb245c35709e6772fc93f3d9560f", "gold_pages": [28, 29], "note": "cross-lingual en->zh"}
+{"q": "What is the total length of optical cable lines in China?", "lang": "en", "doc_id": "26b49c00db808a746e2b8cd1362b480c39cccb245c35709e6772fc93f3d9560f", "gold_pages": [22], "note": "cross-lingual en->zh"}
+{"q": "How large is the rural internet user population in China?", "lang": "en", "doc_id": "26b49c00db808a746e2b8cd1362b480c39cccb245c35709e6772fc93f3d9560f", "gold_pages": [11, 37], "note": "cross-lingual en->zh"}
+{"q": "How many elderly internet users are there in China?", "lang": "en", "doc_id": "26b49c00db808a746e2b8cd1362b480c39cccb245c35709e6772fc93f3d9560f", "gold_pages": [43], "note": "cross-lingual en->zh"}
+{"q": "What share of online payment users are there among Chinese netizens?", "lang": "en", "doc_id": "26b49c00db808a746e2b8cd1362b480c39cccb245c35709e6772fc93f3d9560f", "gold_pages": [61], "note": "cross-lingual en->zh"}
+
+# --- unanswerable: nothing in the corpus supports these; the system must abstain ------
+{"q": "Who won the 2026 FIFA World Cup?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [], "note": "unanswerable — outside corpus"}
+{"q": "What is my exam timetable for next week?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [], "note": "unanswerable — personal, no source"}
+{"q": "What was the price of Bitcoin in March 2024?", "lang": "en", "doc_id": "26b49c00db808a746e2b8cd1362b480c39cccb245c35709e6772fc93f3d9560f", "gold_pages": [], "note": "unanswerable — outside corpus"}
+{"q": "请给出2025年我国网民规模的预测数字。", "lang": "zh", "doc_id": "26b49c00db808a746e2b8cd1362b480c39cccb245c35709e6772fc93f3d9560f", "gold_pages": [], "note": "unanswerable — report stops at 2021"}
+{"q": "How do I install Microsoft Excel on macOS?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [], "note": "unanswerable — corpus covers StarOffice, not Excel"}
