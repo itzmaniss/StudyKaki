@@ -11,10 +11,13 @@ by position in the list passed here. `answer/cite.py` resolves `[n]` back to
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import math
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 
 from answer.cite import strip_all_markers
 from core.schema import Answer, Chunk, Retrieved
+from ingest.normalize import script_histogram
 
 # §0.6 — the literal abstain text. Do not paraphrase; the UI and eval both match on it.
 ABSTAIN_MESSAGE = "I couldn't find this in your documents."
@@ -47,6 +50,36 @@ number, a chapter, or a document — you have no source to point at.
 4. Be concise. No preamble."""
 
 
+# Characters per token by script, measured on this corpus against the Qwen3-4B INT4
+# tokenizer (BLOCKERS #11). Tamil is why this table exists: it packs roughly twice as many
+# tokens into the same character count as English, so five Tamil chunks are ~10.4k tokens
+# where five English ones are ~4.7k. Unmeasured scripts inherit the rate of the measured one
+# they most resemble, biased dense — Devanagari and Thai price as Tamil, not as Latin.
+_CHARS_PER_TOKEN: dict[str, float] = {
+    "taml": 1.10,
+    "deva": 1.10,
+    "thai": 1.10,
+    "han": 1.62,
+    "hans": 1.62,
+    "hant": 1.62,
+    "kana": 1.62,
+    "hang": 1.62,
+    "jpan": 1.62,
+    "kore": 1.62,
+    "latn": 2.33,
+    "cyrl": 2.33,
+    "arab": 2.33,
+}
+
+# Digits, punctuation and whitespace carry no script; price them as Latin.
+_DEFAULT_CHARS_PER_TOKEN = 2.33
+
+# The table holds averages, so an individual passage can run denser than its script's mean.
+# This estimate is only reached when no real tokenizer is available, and undercounting
+# reintroduces the exact failure the budget exists to prevent — so it deliberately runs high.
+_ESTIMATE_SAFETY = 1.15
+
+
 class Tier3DisabledError(RuntimeError):
     """§9: Tier 3 defaults to off and is opt-in only.
 
@@ -74,6 +107,76 @@ def build_prompt(
     q = _check_question(question)
     context = format_context(hits, doc_names=doc_names)
     return f"{system}\n\nContext:\n{context}\n\nQuestion: {q}\nAnswer:"
+
+
+def estimate_tokens(text: str) -> int:
+    """Script-weighted token estimate, for when no real tokenizer is at hand.
+
+    Prefer the generator's own `count_tokens`; this is the documented fallback. Counting
+    whitespace words (`ingest.chunk.count_tokens`) is *not* an alternative here — it
+    undercounts Tamil subwords roughly sevenfold, which is precisely how BLOCKERS #11 stayed
+    invisible until generation crashed.
+    """
+    if not text:
+        return 0
+    counts = script_histogram(text)
+    tokens = (len(text) - sum(counts.values())) / _DEFAULT_CHARS_PER_TOKEN
+    for bucket, n in counts.items():
+        tokens += n / _CHARS_PER_TOKEN.get(bucket, _DEFAULT_CHARS_PER_TOKEN)
+    return math.ceil(tokens * _ESTIMATE_SAFETY)
+
+
+@dataclass(frozen=True)
+class FittedContext:
+    """The context blocks that actually fit the prompt budget, and the prompt they build."""
+
+    hits: tuple[Retrieved, ...]
+    prompt: str
+    tokens: int
+    dropped: int
+    budget: int
+
+    @property
+    def over_budget(self) -> bool:
+        """True when even one block busts the budget — generation is attempted regardless."""
+        return self.tokens > self.budget
+
+
+def fit_context(
+    question: str,
+    hits: Sequence[Retrieved],
+    *,
+    max_prompt_tokens: int,
+    count_tokens: Callable[[str], int] = estimate_tokens,
+    doc_names: Mapping[str, str] | None = None,
+    system: str = SYSTEM_INSTRUCTION,
+) -> FittedContext:
+    """Longest prefix of `hits` whose Tier 1 prompt fits `max_prompt_tokens` (BLOCKERS #11).
+
+    Blocks are dropped from the tail, so the highest-scoring context is what survives. At
+    least one block is always kept, and a lone block over budget is returned anyway for the
+    caller to log and attempt: an answer from three chunks beats an exception from five.
+
+    Truncating a block's *text* to fit is deliberately not done. It would keep the block count
+    up at the cost of the §4 provenance contract — a citation would point at a page whose text
+    the model was never shown.
+    """
+    if max_prompt_tokens <= 0:
+        raise ValueError(f"max_prompt_tokens must be > 0, got {max_prompt_tokens}")
+    checked = _check_hits(hits)
+    kept = checked
+    while True:
+        prompt = build_prompt(question, kept, doc_names=doc_names, system=system)
+        tokens = count_tokens(prompt)
+        if tokens <= max_prompt_tokens or len(kept) == 1:
+            return FittedContext(
+                hits=tuple(kept),
+                prompt=prompt,
+                tokens=tokens,
+                dropped=len(checked) - len(kept),
+                budget=max_prompt_tokens,
+            )
+        kept = kept[:-1]
 
 
 def abstain_answer(trace_id: str) -> Answer:

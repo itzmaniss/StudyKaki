@@ -20,6 +20,8 @@ from answer.prompt import (
     abstain_answer,
     build_prompt,
     build_tier3_prompt,
+    estimate_tokens,
+    fit_context,
     format_context,
     render_tier3_answer,
 )
@@ -269,6 +271,84 @@ def test_tier3_render_rejects_non_string_model_text(bad):
 def test_tier3_render_rejects_bad_trace_id():
     with pytest.raises(ValueError, match="trace_id"):
         render_tier3_answer("text", "", enabled=True)
+
+
+# --- prompt budget and context fitting (BLOCKERS #11) --------------------------------
+
+
+def test_tamil_is_priced_denser_than_latin_for_the_same_character_count():
+    """The whole of #11 in one assertion: equal characters, unequal token cost.
+
+    `ingest.chunk.count_tokens` counts whitespace words and would rate these two the same,
+    which is exactly why it cannot be used as a prompt budget.
+    """
+    latin = "a" * 300
+    tamil = "த" * 300
+    assert estimate_tokens(tamil) > estimate_tokens(latin) * 1.5
+
+
+def test_the_estimate_never_undercounts_the_measured_tamil_rate():
+    """Tamil measured at 1.10 chars/token; an estimate below that reintroduces the crash."""
+    tamil = "த" * 1000
+    assert estimate_tokens(tamil) >= 1000 / 1.10
+
+
+def test_empty_text_costs_nothing():
+    assert estimate_tokens("") == 0
+
+
+def test_context_is_trimmed_from_the_tail_so_the_best_hits_survive(hits):
+    """Dropping is tail-first: rank 1 is the last thing to go."""
+    fitted = fit_context("q", hits, max_prompt_tokens=10_000, count_tokens=lambda text: len(text))
+    assert fitted.dropped == 0
+    assert [h.rank for h in fitted.hits] == [1, 2, 3]
+
+    tight = fit_context("q", hits, max_prompt_tokens=10_000, count_tokens=lambda _: 20_000)
+    assert [h.rank for h in tight.hits] == [1]
+    assert tight.dropped == 2
+
+
+def test_a_fitting_prefix_is_kept_whole(hits):
+    """Counting only the blocks, two fit and the third does not.
+
+    Counts block *bodies*, not `[n]` markers: SYSTEM_INSTRUCTION quotes "[1] or [2][3]" as
+    its citation example, so marker-matching would score every prompt identically.
+    """
+    per_block = 100
+
+    def count(text: str) -> int:
+        return per_block * text.count("body of block ")
+
+    fitted = fit_context("q", hits, max_prompt_tokens=250, count_tokens=count)
+    assert [h.rank for h in fitted.hits] == [1, 2]
+    assert fitted.dropped == 1
+    assert fitted.tokens == 200
+    assert fitted.over_budget is False
+
+
+def test_one_oversized_block_is_returned_rather_than_dropped(hits):
+    """#11's rule: trimming beats failing, but so does trying beats abstaining."""
+    fitted = fit_context("q", hits, max_prompt_tokens=10, count_tokens=lambda _: 9_999)
+    assert len(fitted.hits) == 1
+    assert fitted.over_budget is True
+    assert fitted.tokens == 9_999
+
+
+def test_the_returned_prompt_is_the_one_built_from_the_kept_hits(hits):
+    """The caller must generate from `fitted.prompt`, not rebuild it and drift."""
+    fitted = fit_context("q", hits, max_prompt_tokens=250, count_tokens=lambda _: 100)
+    assert fitted.prompt == build_prompt("q", list(fitted.hits))
+
+
+def test_a_non_positive_budget_is_refused(hits):
+    with pytest.raises(ValueError, match="max_prompt_tokens must be > 0"):
+        fit_context("q", hits, max_prompt_tokens=0)
+
+
+def test_fitting_zero_hits_is_refused(hits):
+    """Empty context is an abstain decision, not a trimming one (§0.6)."""
+    with pytest.raises(ValueError, match="zero hits"):
+        fit_context("q", [], max_prompt_tokens=6000)
 
 
 # --- Tier 2: interface only (§9, §11) ------------------------------------------------

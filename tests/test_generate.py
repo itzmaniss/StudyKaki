@@ -38,7 +38,15 @@ from core.telemetry import TIER_LOCAL_INDEX, TIER_PARAMETRIC, TraceRecorder
 # --- fixtures and fakes --------------------------------------------------------------
 
 
-def make_hit(rank: int, *, score: float | None = None) -> Retrieved:
+def make_hit(
+    rank: int,
+    *,
+    score: float | None = None,
+    text: str | None = None,
+    lang: str = "en",
+    script: str = "latn",
+) -> Retrieved:
+    body = f"body of block {rank}" if text is None else text
     chunk = Chunk(
         chunk_id=f"c{rank}",
         doc_id="sha256:deadbeefcafef00d",
@@ -47,10 +55,10 @@ def make_hit(rank: int, *, score: float | None = None) -> Retrieved:
         block_ids=[f"b{rank}"],
         bbox_union=(0.0, 0.0, 1.0, 1.0),
         heading_path=["Chapter 3", "3.2 Photosynthesis"],
-        text=f"body of block {rank}",
-        token_count=4,
-        lang="en",
-        script="latn",
+        text=body,
+        token_count=len(body.split()) or 1,
+        lang=lang,
+        script=script,
     )
     return Retrieved(chunk=chunk, score=0.9 if score is None else score, rank=rank)
 
@@ -210,6 +218,100 @@ def test_only_n_context_hits_are_offered_to_the_model(cfg):
     assert f"[{cfg.retrieve.n_context + 1}]" not in gen.prompts[0]
     # `[6]` indexes a block the model was never shown, so it is an invention like any other.
     assert result.answer.citations == []
+
+
+# --- the prompt budget (BLOCKERS #11) ------------------------------------------------
+
+
+def tamil_hits(n: int, *, chars: int = 2200) -> list[Retrieved]:
+    """`n` Tamil chunks of realistic size — the shape that made every Tamil question fail."""
+    return [
+        make_hit(i, score=0.9, text="தமிழ் " * (chars // 6), lang="ta", script="taml")
+        for i in range(1, n + 1)
+    ]
+
+
+class TokenizingGenerator(FakeGenerator):
+    """A generator that can count its own tokens, like `OpenVinoGenerator` does."""
+
+    def __init__(self, *passes: list[str], chars_per_token: float = 1.10) -> None:
+        super().__init__(*passes)
+        self.chars_per_token = chars_per_token
+        self.counted: list[int] = []
+
+    def count_tokens(self, text: str) -> int:
+        n = int(len(text) / self.chars_per_token)
+        self.counted.append(n)
+        return n
+
+
+def test_tamil_context_is_trimmed_instead_of_overflowing_the_model(cfg):
+    """BLOCKERS #11 regression: five Tamil chunks used to reach the model and crash it.
+
+    Asserts on the budget contract, not on a chunk count: the point is that whatever reaches
+    the model fits, and that an answer comes back at all.
+    """
+    budget = cfg.generate.max_prompt_tokens
+    gen = TokenizingGenerator(["ஜார்ஜ் பூல் [1]"])
+
+    result = generate_answer("கேள்வி", generator=gen, cfg=cfg, hits=tamil_hits(5))
+
+    assert gen.count_tokens(gen.prompts[0]) <= budget
+    assert len(result.context) < cfg.retrieve.n_context
+    assert result.answer.abstained is False
+
+
+def test_english_context_of_the_same_shape_is_left_alone(cfg):
+    """The trim is budget-driven, not language-driven — Latin at this size still fits."""
+    english = [make_hit(i, score=0.9, text="photosynthesis " * 30) for i in range(1, 6)]
+    gen = TokenizingGenerator(["an answer [1]"], chars_per_token=2.33)
+
+    result = generate_answer("q", generator=gen, cfg=cfg, hits=english)
+
+    assert len(result.context) == cfg.retrieve.n_context
+
+
+def test_the_generators_own_tokenizer_is_preferred_over_the_estimate(cfg):
+    gen = TokenizingGenerator(["an answer [1]"])
+
+    generate_answer("q", generator=gen, cfg=cfg, hits=tamil_hits(5))
+
+    assert gen.counted, "fit_context did not consult the generator's count_tokens"
+
+
+def test_a_generator_without_a_tokenizer_still_gets_trimmed(cfg):
+    """`count_tokens` is optional on the Protocol; the estimate must cover for it."""
+    gen = FakeGenerator(["ஜார்ஜ் பூல் [1]"])
+    assert not hasattr(gen, "count_tokens")
+
+    result = generate_answer("கேள்வி", generator=gen, cfg=cfg, hits=tamil_hits(5))
+
+    assert len(result.context) < cfg.retrieve.n_context
+
+
+def test_citations_resolve_against_the_trimmed_context_not_the_requested_one(cfg):
+    """The numbering contract must follow the blocks that survived the trim."""
+    gen = TokenizingGenerator(["cited [5]"])
+
+    result = generate_answer("கேள்வி", generator=gen, cfg=cfg, hits=tamil_hits(5))
+
+    # `[5]` indexes a block that was trimmed away, so it is an invention like any other.
+    assert len(result.context) < 5
+    assert result.answer.citations == []
+    assert result.markers_emitted == 1
+    assert result.markers_grounded == 0
+
+
+def test_a_single_oversized_chunk_is_attempted_rather_than_abstained(cfg):
+    """One chunk over budget still goes to the model — #11 prefers a try to a refusal."""
+    huge = [make_hit(1, score=0.9, text="தமிழ் " * 4000, lang="ta", script="taml")]
+    gen = TokenizingGenerator(["ஒரு பதில் [1]"])
+
+    result = generate_answer("கேள்வி", generator=gen, cfg=cfg, hits=huge)
+
+    assert len(result.context) == 1
+    assert gen.prompts, "the model was never called"
+    assert result.answer.abstained is False
 
 
 def test_provenance_travels_into_the_prompt(cfg, hits):
@@ -540,6 +642,7 @@ def test_settings_come_from_config(cfg):
     settings = GenerationSettings.from_config(cfg)
     assert settings.max_new_tokens == cfg.generate.max_new_tokens
     assert settings.temperature == pytest.approx(cfg.generate.temperature)
+    assert settings.max_prompt_tokens == cfg.generate.max_prompt_tokens
 
 
 def test_settings_reject_nonsense():
@@ -547,3 +650,5 @@ def test_settings_reject_nonsense():
         GenerationSettings(max_new_tokens=0, temperature=0.2)
     with pytest.raises(ValueError, match="temperature"):
         GenerationSettings(max_new_tokens=8, temperature=-1.0)
+    with pytest.raises(ValueError, match="max_prompt_tokens"):
+        GenerationSettings(max_new_tokens=8, temperature=0.2, max_prompt_tokens=0)

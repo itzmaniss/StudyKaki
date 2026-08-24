@@ -2,8 +2,8 @@
 
 The §4 flow, end to end:
 
-    retrieve k -> if top score < tau ABSTAIN -> take n_context -> prompt with numbered
-    blocks -> stream -> cite.verify() strips invented [n] -> Answer
+    retrieve k -> if top score < tau ABSTAIN -> take n_context -> trim to the prompt budget
+    -> prompt with numbered blocks -> stream -> cite.verify() strips invented [n] -> Answer
 
 Two rules shape the code more than anything else:
 
@@ -12,6 +12,13 @@ to ground an answer in, and a fluent guess is the worst possible output for a st
 The model is also told to reply with the abstain message when the context does not cover
 the question (`answer/prompt.py` rule 5); when it does, we take it at its word and drop the
 citations rather than shipping an "answer" that says it found nothing but points at pages.
+
+**Trimming beats failing (BLOCKERS #11).** `n_context` is a request, not a guarantee. OpenVINO's
+INT4 CPU MatMul cannot build a primitive descriptor much above 7k prompt tokens, and Tamil hits
+that first — it tokenizes at ~1.1 chars/token against English's 2.33, so five Tamil chunks are
+~10.4k tokens where five English ones are ~4.7k. Context is therefore trimmed from the tail to
+`generate.max_prompt_tokens` before the model is ever called. An answer from three chunks is
+worth more than an exception from five.
 
 **The pipeline is injectable.** `StreamingGenerator` is a Protocol, so every test here runs
 against a fake and none need the 2.5 GB INT4 IR. `OpenVinoGenerator` takes its `LLMPipeline`
@@ -38,9 +45,11 @@ from answer.cite import find_markers, verify
 from answer.prompt import (
     ABSTAIN_MESSAGE,
     TIER3_DISCLAIMER,
+    FittedContext,
     abstain_answer,
-    build_prompt,
     build_tier3_prompt,
+    estimate_tokens,
+    fit_context,
     render_tier3_answer,
 )
 from core.config import Config
@@ -91,18 +100,23 @@ class GenerationSettings:
 
     max_new_tokens: int
     temperature: float
+    #: Prompt-side ceiling (BLOCKERS #11). Context is trimmed to fit before generation.
+    max_prompt_tokens: int = 6000
 
     def __post_init__(self) -> None:
         if self.max_new_tokens <= 0:
             raise ValueError(f"max_new_tokens must be > 0, got {self.max_new_tokens}")
         if self.temperature < 0:
             raise ValueError(f"temperature must be >= 0, got {self.temperature}")
+        if self.max_prompt_tokens <= 0:
+            raise ValueError(f"max_prompt_tokens must be > 0, got {self.max_prompt_tokens}")
 
     @classmethod
     def from_config(cls, cfg: Config) -> GenerationSettings:
         return cls(
             max_new_tokens=cfg.generate.max_new_tokens,
             temperature=cfg.generate.temperature,
+            max_prompt_tokens=cfg.generate.max_prompt_tokens,
         )
 
 
@@ -116,6 +130,10 @@ class StreamingGenerator(Protocol):
     Optional: a `last_usage: TokenUsage | None` attribute, set when a stream completes. It
     is read with `getattr`, so a generator that cannot count tokens simply omits it and the
     trace records zero rather than an invented number (§0.5).
+
+    Optional: a `count_tokens(text) -> int` method, used to hold the prompt under
+    `max_prompt_tokens` (BLOCKERS #11). Also read with `getattr`; a generator that omits it
+    falls back to `answer.prompt.estimate_tokens`.
     """
 
     name: str
@@ -153,6 +171,21 @@ class OpenVinoGenerator:
         self.requested_device = requested_device
         self.device = device
         self.last_usage: TokenUsage | None = None
+
+    def count_tokens(self, text: str) -> int:
+        """Exact prompt length, from the pipeline's own tokenizer.
+
+        This is what makes the BLOCKERS #11 budget trustworthy: the character-rate estimate
+        is calibrated on averages, while this is the number the MatMul will actually see. A
+        GenAI build that exposes no tokenizer falls back to the estimate — an approximate
+        budget still beats the failure it prevents.
+        """
+        try:
+            ids = self.pipe.get_tokenizer().encode(text).input_ids
+            return int(ids.get_shape()[-1])
+        except (AttributeError, IndexError, RuntimeError, TypeError) as e:
+            log.warning("generator.tokenizer_unavailable", model=self.name, error=str(e))
+            return estimate_tokens(text)
 
     def make_config(self, settings: GenerationSettings) -> Any:
         genai = _genai()
@@ -406,9 +439,9 @@ class AnswerStream:
         emitted = grounded = 0
 
         if not abstains(hits, self._cfg.retrieve.tau):
-            context = hits[: self._cfg.retrieve.n_context]
-            prompt = build_prompt(self.question, context, doc_names=self._doc_names)
-            raw = yield from self._generate(prompt, STAGE_GENERATE)
+            fitted = self._fit_context(hits)
+            context = list(fitted.hits)
+            raw = yield from self._generate(fitted.prompt, STAGE_GENERATE)
             text, citations = verify(raw, context)
             emitted, grounded = len(find_markers(raw)), len(find_markers(text))
             text = text.strip()
@@ -444,6 +477,35 @@ class AnswerStream:
             context=tuple(context),
             trace=trace,
         )
+
+    def _fit_context(self, hits: Sequence[Retrieved]) -> FittedContext:
+        """Take `n_context` blocks, then drop from the tail until the prompt fits (#11)."""
+        requested = self._cfg.retrieve.n_context
+        budget = self._settings.max_prompt_tokens
+        fitted = fit_context(
+            self.question,
+            hits[:requested],
+            max_prompt_tokens=budget,
+            count_tokens=getattr(self._generator, "count_tokens", estimate_tokens),
+            doc_names=self._doc_names,
+        )
+        if fitted.dropped:
+            log.info(
+                "generate.context_trimmed",
+                requested=requested,
+                kept=len(fitted.hits),
+                dropped=fitted.dropped,
+                prompt_tokens=fitted.tokens,
+                budget=budget,
+            )
+        if fitted.over_budget:
+            log.warning(
+                "generate.prompt_over_budget",
+                prompt_tokens=fitted.tokens,
+                budget=budget,
+                hint="a single chunk exceeds the budget; generation may fail (BLOCKERS #11)",
+            )
+        return fitted
 
     def _generate(self, prompt: str, stage: str) -> Iterator[str]:
         """Stream one generation pass, returning the raw (unverified) text it produced."""

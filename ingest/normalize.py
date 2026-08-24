@@ -99,13 +99,25 @@ def _bucket(ch: str) -> str | None:
     return bucket if lo <= cp <= hi else None
 
 
-def detect_script(text: str) -> str:
-    """Dominant ISO 15924-style code for `text`, or `unknown` when it carries no letters."""
+def script_histogram(text: str) -> dict[str, int]:
+    """Character counts per raw script bucket, for callers that need the mix, not the winner.
+
+    Buckets are unresolved: `han`, `kana` and `hang` are reported as themselves rather than
+    folded into `hans`/`jpan`/`kore`, because that decision needs the whole string (see
+    `_resolve`). Characters carrying no script — digits, punctuation, whitespace — are absent,
+    so the counts sum to at most `len(text)`.
+    """
     counts: dict[str, int] = {}
     for ch in text:
         bucket = _bucket(ch)
         if bucket is not None:
             counts[bucket] = counts.get(bucket, 0) + 1
+    return counts
+
+
+def detect_script(text: str) -> str:
+    """Dominant ISO 15924-style code for `text`, or `unknown` when it carries no letters."""
+    counts = script_histogram(text)
     if not counts:
         return "unknown"
     return _resolve(counts, text)
