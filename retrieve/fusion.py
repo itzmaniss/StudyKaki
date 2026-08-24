@@ -4,26 +4,38 @@ V1 wires **dense retrieval only**. This module exists so the seam is real rather
 imagined: `fuse()` is what `retrieve/dense.py` output goes through today, and it already
 takes a list of ranked lists rather than one.
 
-**What would plug in here (V2, §10 — not built, gated on tonight's eval numbers).**
-`retrieve/lexical.py` produces a BM25 `RankedList` over the same chunk corpus and is passed
-alongside the dense list. Nothing in this file changes when that happens. Per §10 the real
-work there is per-script tokenization (jieba for zh, fugashi for ja, pythainlp for th, ICU
-fallback; Latin/Tamil/Devanagari split on whitespace) — not the BM25 scoring itself. §11 and
-CLAUDE.md forbid building it now, so this file deliberately contains no lexical retrieval.
+**V2 (§10) plugged in as designed.** `retrieve/lexical.py` produces a BM25 `RankedList` over
+the same chunk corpus and is passed alongside the dense list; nothing in the fusion arithmetic
+below changed when it arrived. `HybridRetriever` at the bottom of this file is the composition,
+off unless `retrieve.hybrid.enabled`.
 
-**The score-units trap.** RRF scores are derived from ranks, not similarities: the best
-possible RRF score for a single list is `1/(60+1)` ≈ 0.016, far below `cfg.retrieve.tau`
-(0.35). Feeding RRF output to `retriever.abstains(hits, tau)` would therefore abstain on
-every query. `FusionResult.scores_are_similarities` says which units you are holding, and
-the abstain decision stays on the dense list (see `retrieve/dense.py`).
+**The score-units trap — and why `HybridRetriever` cannot yet answer.** RRF scores are derived
+from ranks, not similarities: the best possible RRF score for a single list is `1/(60+1)`
+≈ 0.016, far below `cfg.retrieve.tau` (0.45). Feeding RRF output to
+`retriever.abstains(hits, tau)` would abstain on every query.
+`FusionResult.scores_are_similarities` says which units you are holding.
+
+This makes the hybrid arm immediately measurable on `recall@k` and `mrr@10`, which are pure
+rank metrics and never look at `score` — and *not* yet safe to put behind `answer/generate.py`,
+whose abstain gate is calibrated on cosine (BLOCKERS #8: tau's safe window is 0.01 wide). The
+gap is recorded as BLOCKERS #12; `last_dense_top_score` exposes what an abstain decision would
+need, but nothing consumes it yet.
 """
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 
+import structlog
+
+from core.config import Config
 from core.schema import Retrieved
+from retrieve.retriever import Retriever
+
+log = structlog.get_logger("retrieve.fusion")
 
 #: §10 — reciprocal rank fusion constant. Damps the influence of any single list's top hit.
 RRF_K = 60
@@ -128,3 +140,68 @@ def fuse(
         scores_are_similarities=False,
         sources=names,
     )
+
+
+class HybridRetriever:
+    """Dense + BM25, fused by RRF — the §10 hybrid arm.
+
+    Both arms are asked for `k` hits and fused down to `k`, rather than each being asked for
+    `k/2`. A chunk that both arms rank highly should be able to beat one that only dense found,
+    and that comparison cannot happen if the lists are truncated before fusion.
+
+    Scores on the returned hits are **RRF scores, not similarities** — see the module
+    docstring. `last_dense_top_score` carries the cosine score an abstain decision would need.
+    """
+
+    @classmethod
+    def open(
+        cls,
+        cfg: Config,
+        index_path: str | Path | None = None,
+        *,
+        models_manifest_path: str | Path | None = None,
+    ) -> HybridRetriever:
+        """Production wiring. Both arms open the same index directory, by construction."""
+        from retrieve.dense import DenseRetriever, default_index_dir
+        from retrieve.lexical import LexicalRetriever
+
+        resolved = Path(index_path) if index_path is not None else default_index_dir(cfg)
+        dense = DenseRetriever.open(cfg, resolved, models_manifest_path=models_manifest_path)
+        # Reuse the already-loaded index rather than parsing chunks.parquet a second time.
+        return cls(dense, LexicalRetriever(dense.index, cfg), cfg)
+
+    def __init__(self, dense: Retriever, lexical: Retriever, cfg: Config) -> None:
+        self.dense = dense
+        self.lexical = lexical
+        self.cfg = cfg
+        self.last_dense_top_score: float | None = None
+
+    def retrieve(self, query: str, k: int) -> list[Retrieved]:
+        if k < 1:
+            raise ValueError(f"k must be >= 1, got {k}")
+
+        started = time.perf_counter()
+        cfg = self.cfg.retrieve.hybrid
+        dense_hits = self.dense.retrieve(query, k)
+        lexical_hits = self.lexical.retrieve(query, k)
+        self.last_dense_top_score = dense_hits[0].score if dense_hits else None
+
+        result = fuse(
+            [
+                RankedList(name="dense", hits=list(dense_hits), weight=cfg.dense_weight),
+                RankedList(name="lexical", hits=list(lexical_hits), weight=cfg.lexical_weight),
+            ],
+            k=k,
+            rrf_k=cfg.rrf_k,
+        )
+        log.info(
+            "retrieve.hybrid",
+            k=k,
+            n_dense=len(dense_hits),
+            n_lexical=len(lexical_hits),
+            n_fused=len(result.hits),
+            method=result.method,
+            dense_top_score=self.last_dense_top_score,
+            duration_ms=round((time.perf_counter() - started) * 1000, 1),
+        )
+        return result.hits
