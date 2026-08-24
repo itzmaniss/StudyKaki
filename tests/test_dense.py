@@ -786,3 +786,38 @@ def test_open_with_a_prefixed_index_applies_the_prefix_exactly_once(tmp_path, cf
     r.retrieve("what is photosynthesis", k=1)
 
     assert embedder.calls == [(["query: what is photosynthesis"], "")]
+
+
+def test_cosine_scoring_emits_no_numerical_warnings():
+    """Accelerate sets sticky FP flags on the masked padding lanes of its vectorised matmul,
+    so numpy blamed `block @ query` on every query. Noise that loud hides a real warning."""
+    import warnings
+
+    from retrieve.dense import _cosine_scores
+
+    rng = np.random.default_rng(0)
+    vectors = rng.standard_normal((300, 1024)).astype(np.float32)
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+    query = vectors[7].copy()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        scores = _cosine_scores(vectors, query, block_rows=64)
+    assert [str(w.message) for w in caught] == []
+    assert np.isfinite(scores).all()
+    # the query is row 7, so row 7 must be its own best match at cosine 1
+    assert int(np.argmax(scores)) == 7
+    assert scores[7] == pytest.approx(1.0, abs=1e-5)
+
+
+def test_a_zero_norm_row_scores_zero_not_nan():
+    """Suppressing the flags must not hide the degenerate case they could have signalled."""
+    from retrieve.dense import _cosine_scores
+
+    vectors = np.zeros((3, 4), dtype=np.float32)
+    vectors[0] = [1.0, 0.0, 0.0, 0.0]
+    vectors[2] = [0.0, 1.0, 0.0, 0.0]
+    scores = _cosine_scores(vectors, np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), 2)
+    assert np.isfinite(scores).all()
+    assert scores[1] == 0.0
+    assert scores[0] == pytest.approx(1.0)

@@ -387,12 +387,21 @@ def _cosine_scores(vectors: np.ndarray, query: np.ndarray, block_rows: int) -> n
     if n == 0 or query_norm == 0.0:
         return scores
 
-    for start in range(0, n, block_rows):
-        block = np.asarray(vectors[start : start + block_rows], dtype=np.float32)
-        dots = block @ query
-        denom = np.linalg.norm(block, axis=1) * query_norm
-        out = scores[start : start + block.shape[0]]
-        np.divide(dots, denom, out=out, where=denom > 0.0)
+    # errstate covers the BLAS kernel, not our arithmetic. Accelerate on Apple Silicon sets
+    # the sticky FP exception flags while processing the padding lanes at the edge of a
+    # vectorised matmul; those lanes are masked out of the result, but numpy reads the flags
+    # afterwards and reports divide-by-zero/overflow/invalid against `block @ query`. It fires
+    # on a finite, correct product of finite, unit-norm inputs — verified with no OpenVINO in
+    # the process — so it is noise on every single query, and noise that loud is where a real
+    # numerical warning goes to hide. The degenerate case this could otherwise mask is handled
+    # explicitly below: `where=denom > 0.0` leaves zero-norm rows at 0.0 rather than NaN.
+    with np.errstate(divide="ignore", over="ignore", invalid="ignore", under="ignore"):
+        for start in range(0, n, block_rows):
+            block = np.asarray(vectors[start : start + block_rows], dtype=np.float32)
+            dots = block @ query
+            denom = np.linalg.norm(block, axis=1) * query_norm
+            out = scores[start : start + block.shape[0]]
+            np.divide(dots, denom, out=out, where=denom > 0.0)
     return scores
 
 
