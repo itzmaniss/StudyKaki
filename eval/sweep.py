@@ -133,15 +133,18 @@ def run_permutation(
 
 def as_table(rows: list[SweepRow], baseline: dict[str, Any], n_questions: int = 1) -> str:
     """One line per permutation, deltas against the V1 baseline."""
-    head = f"{'arm':<24}{'recall@5':>10}{'Δ':>9}{'MRR@10':>9}{'Δ':>9}{'ground':>9}{'ms/q':>9}"
+    head = (
+        f"{'arm':<22}{'recall@5':>10}{'Δ':>8}{'MRR@10':>9}{'Δ':>8}{'ground':>8}{'Δ':>8}{'ms/q':>9}"
+    )
     out = [head, "-" * len(head)]
     b5 = baseline.get("recall@5")
     bmrr = baseline.get("mrr@10")
+    bg = baseline.get("groundedness")
     n = max(n_questions, 1)
 
     for row in rows:
         if row.result is None:
-            out.append(f"{row.label:<24}{'skipped: ' + row.skipped:>45}")
+            out.append(f"{row.label:<22}{'skipped: ' + row.skipped:>45}")
             continue
         if row.degraded:
             # Never print a number an arm did not produce. A silent fallback reads exactly
@@ -154,9 +157,14 @@ def as_table(rows: list[SweepRow], baseline: dict[str, Any], n_questions: int = 
         d5 = f"{r.recall_at_5 - b5:+.3f}" if b5 is not None else "n/a"
         dmrr = f"{r.mrr_at_10 - bmrr:+.3f}" if bmrr is not None else "n/a"
         g = "n/a" if r.groundedness is None else f"{r.groundedness:.3f}"
+        dg = (
+            f"{r.groundedness - bg:+.3f}"
+            if (r.groundedness is not None and bg is not None)
+            else "n/a"
+        )
         out.append(
-            f"{row.label:<24}{r.recall_at_5:>10.3f}{d5:>9}"
-            f"{r.mrr_at_10:>9.3f}{dmrr:>9}{g:>9}{row.seconds / n * 1000:>9.0f}"
+            f"{row.label:<22}{r.recall_at_5:>10.3f}{d5:>8}"
+            f"{r.mrr_at_10:>9.3f}{dmrr:>8}{g:>8}{dg:>8}{row.seconds / n * 1000:>9.0f}"
         )
     return "\n".join(out)
 
@@ -171,6 +179,15 @@ def main(argv: list[str] | None = None) -> int:
         "--arms",
         default=",".join(ARMS),
         help="comma-separated arms to sweep; others stay off",
+    )
+    ap.add_argument(
+        "--only",
+        action="append",
+        default=None,
+        metavar="ARMS",
+        help="run just this combination, e.g. --only rerank+hybrid (repeatable; "
+        '"dense" means all arms off). Skips the other permutations, which matters when '
+        "--groundedness makes each one cost ~80 min.",
     )
     ap.add_argument(
         "--groundedness",
@@ -193,9 +210,20 @@ def main(argv: list[str] | None = None) -> int:
 
         generator = load_generator(base_cfg)
 
+    wanted = None
+    if args.only:
+        wanted = set()
+        for spec in args.only:
+            picked = tuple(a for a in ARMS if a in spec.split("+"))
+            if spec.strip() not in ("dense", "") and not picked:
+                raise SystemExit(f"--only {spec!r} names no known arm; known: {list(ARMS)}")
+            wanted.add(picked)
+
     rows: list[SweepRow] = []
     for flags in product((False, True), repeat=len(arms)):
         on = tuple(a for a, f in zip(arms, flags, strict=True) if f)
+        if wanted is not None and on not in wanted:
+            continue
         rows.append(run_permutation(on, base_cfg, golden, args.index, generator=generator))
         print(f"  done: {rows[-1].label}", flush=True)
 
