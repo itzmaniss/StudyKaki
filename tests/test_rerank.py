@@ -125,3 +125,36 @@ def test_single_hit_skips_the_model(cfg):
 def test_rejects_bad_k(cfg):
     with pytest.raises(ValueError, match="k must be"):
         with_scorer(FakeInner([]), cfg, FakeScorer({})).retrieve("q", 0)
+
+
+# --- silent degradation must be visible (the bug that faked a sweep result) -----------
+
+
+def test_a_failing_arm_counts_every_degraded_query(cfg):
+    """The bug: TextRerankPipeline threw on all 54 questions, the arm degraded to its inner
+    ranking, and the sweep printed the baseline number as if rerank had been measured."""
+    r = with_scorer(FakeInner([make_hit(i) for i in range(1, 4)]), cfg, exploding)
+
+    for _ in range(3):
+        r.retrieve("q", 3)
+
+    assert r.degraded_calls == 3
+
+
+def test_a_working_arm_reports_no_degradation(cfg):
+    r = with_scorer(FakeInner([make_hit(i) for i in range(1, 4)]), cfg, FakeScorer({0: 0.5}))
+    r.retrieve("q", 3)
+    assert r.degraded_calls == 0
+
+
+def test_degradation_is_visible_through_a_wrapping_arm(cfg):
+    """rerank(hybrid(...)) must not hide a failure in the arm it wraps."""
+    from retrieve.retriever import degraded_calls
+
+    inner = with_scorer(FakeInner([make_hit(i) for i in range(1, 4)]), cfg, exploding)
+    outer = with_scorer(inner, cfg, FakeScorer({0: 0.5}))
+
+    outer.retrieve("q", 3)
+
+    assert outer.degraded_calls == 0
+    assert degraded_calls(outer) == 1

@@ -213,3 +213,46 @@ def test_lexical_index_row_order_matches_the_frame(lexical):
     """fusion dedups on chunk_id; that is only sound if row i is chunk i."""
     assert lexical.bm25.n_docs == len(FIVE)
     assert np.count_nonzero(lexical.bm25.scores(tokenize("mitochondrion", "latn"))) == 1
+
+
+# --- BLOCKERS #12: the abstain gate must read cosine, never RRF -----------------------
+
+
+def test_hybrid_reports_a_cosine_score_for_the_abstain_gate(cfg, lexical):
+    from retrieve.retriever import abstains_for
+
+    chunks = [make_chunk(c, t) for c, t in FIVE]
+    dense = FakeDense([Retrieved(chunk=chunks[1], score=0.77, rank=1)])
+    r = HybridRetriever(dense, lexical, cfg)
+
+    hits = r.retrieve("George Boole", 5)
+
+    # The RRF score alone would abstain on a query dense was confident about.
+    assert hits[0].score < cfg.retrieve.tau
+    assert r.abstain_top_score == pytest.approx(0.77)
+    assert abstains_for(hits, cfg.retrieve.tau, r) is False
+
+
+def test_hybrid_still_abstains_when_dense_is_unconfident(cfg, lexical):
+    from retrieve.retriever import abstains_for
+
+    chunks = [make_chunk(c, t) for c, t in FIVE]
+    dense = FakeDense([Retrieved(chunk=chunks[1], score=0.01, rank=1)])
+    r = HybridRetriever(dense, lexical, cfg)
+
+    hits = r.retrieve("George Boole", 5)
+
+    assert abstains_for(hits, cfg.retrieve.tau, r) is True
+
+
+def test_a_plain_retriever_keeps_the_v1_abstain_behaviour(cfg):
+    """No abstain_top_score means the hit's own score is the gate, exactly as V1."""
+    from retrieve.retriever import abstains_for
+
+    chunks = [make_chunk(c, t) for c, t in FIVE]
+    high = [Retrieved(chunk=chunks[0], score=0.9, rank=1)]
+    low = [Retrieved(chunk=chunks[0], score=0.1, rank=1)]
+
+    assert abstains_for(high, cfg.retrieve.tau, FakeDense(high)) is False
+    assert abstains_for(low, cfg.retrieve.tau, FakeDense(low)) is True
+    assert abstains_for([], cfg.retrieve.tau, None) is True

@@ -22,7 +22,7 @@ import polars as pl
 from core.config import Config, load_config
 from core.schema import Chunk, Retrieved
 from eval.metrics import GoldQuestion, groundedness, mean, recall_at, reciprocal_rank
-from retrieve.retriever import Retriever, abstains
+from retrieve.retriever import Retriever, abstains_for
 
 GOLDEN = Path(__file__).resolve().parent / "golden.jsonl"
 
@@ -117,7 +117,7 @@ def evaluate(
 
     for gold in golden:
         hits = retriever.retrieve(gold.q, k)
-        abstained = abstains(hits, tau)
+        abstained = abstains_for(hits, tau, retriever)
         grounded = _groundedness_of(gold.q, hits, cfg, generator)
         answerable = not gold.unanswerable
         rows.append(

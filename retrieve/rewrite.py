@@ -96,6 +96,8 @@ class RewritingRetriever:
         self.cfg = cfg
         self.rewriter = rewriter
         self.last_rewrite: str | None = None
+        #: Queries where the model was asked to rewrite and produced something unusable.
+        self.degraded_calls = 0
 
     def retrieve(self, query: str, k: int) -> list[Retrieved]:
         self.last_rewrite = None
@@ -109,7 +111,13 @@ class RewritingRetriever:
         # An empty or runaway rewrite means the model ignored the instruction. Original wins:
         # a bad rewrite is worse than no rewrite, and §10 gates this arm on measurement.
         if not rewritten or len(rewritten) > 4 * len(query) + 80:
-            log.warning("rewrite.rejected", original=query, rewritten=rewritten[:120])
+            self.degraded_calls += 1
+            log.warning(
+                "rewrite.rejected",
+                original=query,
+                rewritten=rewritten[:120],
+                degraded_calls=self.degraded_calls,
+            )
             return self.inner.retrieve(query, k)
 
         self.last_rewrite = rewritten

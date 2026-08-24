@@ -64,7 +64,7 @@ def record_saves(monkeypatch) -> list[dict]:
     calls: list[dict] = []
     tok, detok = object(), object()
 
-    def fake_convert_tokenizer(tokenizer, with_detokenizer=False):
+    def fake_convert_tokenizer(tokenizer, with_detokenizer=False, number_of_inputs=1):
         return (tok, detok) if with_detokenizer else tok
 
     def fake_save_model(model, path, compress_to_fp16=True, **kw):

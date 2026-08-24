@@ -22,7 +22,7 @@ import polars as pl
 from core.config import Config, load_config
 from eval.metrics import GoldQuestion
 from eval.run import GOLDEN, EvalResult, evaluate, load_golden
-from retrieve.retriever import Retriever
+from retrieve.retriever import Retriever, degraded_calls
 
 #: §10 order: rerank -> hybrid -> rewrite.
 ARMS = ("rerank", "hybrid", "rewrite")
@@ -40,6 +40,13 @@ class SweepRow:
     result: EvalResult | None
     seconds: float
     skipped: str = ""
+    #: Queries where an arm silently fell back. Non-zero means the metrics below describe
+    #: whatever ran instead of this arm, so they are not reported as a result.
+    degraded: int = 0
+
+    @property
+    def trustworthy(self) -> bool:
+        return self.result is not None and self.degraded == 0
 
     @property
     def label(self) -> str:
@@ -116,7 +123,12 @@ def run_permutation(
         return SweepRow(arms=on, result=None, seconds=0.0, skipped=str(e))
 
     result, _ = evaluate(retriever, golden, cfg, label="+".join(on) or "dense", generator=generator)
-    return SweepRow(arms=on, result=result, seconds=time.perf_counter() - started)
+    return SweepRow(
+        arms=on,
+        result=result,
+        seconds=time.perf_counter() - started,
+        degraded=degraded_calls(retriever),
+    )
 
 
 def as_table(rows: list[SweepRow], baseline: dict[str, Any], n_questions: int = 1) -> str:
@@ -130,6 +142,13 @@ def as_table(rows: list[SweepRow], baseline: dict[str, Any], n_questions: int = 
     for row in rows:
         if row.result is None:
             out.append(f"{row.label:<24}{'skipped: ' + row.skipped:>45}")
+            continue
+        if row.degraded:
+            # Never print a number an arm did not produce. A silent fallback reads exactly
+            # like a real measurement otherwise — see retriever.degraded_calls.
+            out.append(
+                f"{row.label:<24}{f'DEGRADED on {row.degraded}/{n} queries - arm did not run':>55}"
+            )
             continue
         r = row.result
         d5 = f"{r.recall_at_5 - b5:+.3f}" if b5 is not None else "n/a"
@@ -184,6 +203,9 @@ def main(argv: list[str] | None = None) -> int:
     print(as_table(rows, baseline, len(golden)))
     if not baseline:
         print("\n^ no eval/baselines/v1.json — deltas are n/a.")
+    bad = [r.label for r in rows if r.degraded]
+    if bad:
+        print(f"\n^ {', '.join(bad)} degraded — those arms did not run; metrics withheld.")
 
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -196,6 +218,7 @@ def main(argv: list[str] | None = None) -> int:
                     "groundedness": None if r.result is None else r.result.groundedness,
                     "seconds": r.seconds,
                     "skipped": r.skipped,
+                    "degraded": r.degraded,
                 }
                 for r in rows
             ]

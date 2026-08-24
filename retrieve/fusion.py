@@ -176,6 +176,16 @@ class HybridRetriever:
         self.cfg = cfg
         self.last_dense_top_score: float | None = None
 
+    @property
+    def abstain_top_score(self) -> float | None:
+        """Cosine score the abstain gate should read — never the RRF score (BLOCKERS #12).
+
+        The lexical arm cannot contribute here: BM25 scores are unbounded and share no scale
+        with tau, so a lexical-only hit cannot rescue a query dense wanted to abstain on. That
+        is the deliberate cost of keeping tau's calibration (BLOCKERS #8).
+        """
+        return self.last_dense_top_score
+
     def retrieve(self, query: str, k: int) -> list[Retrieved]:
         if k < 1:
             raise ValueError(f"k must be >= 1, got {k}")

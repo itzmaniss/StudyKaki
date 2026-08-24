@@ -62,7 +62,7 @@ from core.telemetry import (
     TraceRecorder,
 )
 from ingest.normalize import detect_script, lang_for_script
-from retrieve.retriever import Retriever, abstains
+from retrieve.retriever import Retriever, abstains_for
 
 log = structlog.get_logger("answer.generate")
 
@@ -438,7 +438,7 @@ class AnswerStream:
         tier = TIER_LOCAL_INDEX
         emitted = grounded = 0
 
-        if not abstains(hits, self._cfg.retrieve.tau):
+        if not abstains_for(hits, self._cfg.retrieve.tau, self._retriever):
             fitted = self._fit_context(hits)
             context = list(fitted.hits)
             raw = yield from self._generate(fitted.prompt, STAGE_GENERATE)

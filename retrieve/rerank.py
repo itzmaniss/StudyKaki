@@ -131,6 +131,9 @@ class RerankingRetriever:
         self.tokenizer = tokenizer
         self.name = name
         self.device = device
+        #: Queries where the cross-encoder threw and we returned the inner ranking. Read by
+        #: eval/sweep.py, which will not report metrics for an arm that degraded.
+        self.degraded_calls = 0
 
     def retrieve(self, query: str, k: int) -> list[Retrieved]:
         if k < 1:
@@ -149,7 +152,13 @@ class RerankingRetriever:
             scores = self._score(query, [h.chunk.text for h in head])
         except (RuntimeError, OSError) as e:
             # §0.5: a degraded ranking beats no answer, but never silently.
-            log.warning("rerank.failed_passthrough", model=self.name, error=str(e))
+            self.degraded_calls += 1
+            log.warning(
+                "rerank.failed_passthrough",
+                model=self.name,
+                degraded_calls=self.degraded_calls,
+                error=str(e),
+            )
             return hits
 
         order = sorted(range(len(head)), key=lambda i: -scores[i])
