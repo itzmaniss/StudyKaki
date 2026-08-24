@@ -19,7 +19,13 @@ models:
   generator: { name: qwen3-4b-instruct,   device: CPU, precision: int4 }
 
 chunk:    { target_tokens: 400, overlap: 60, min_tokens: 80 }
-retrieve: { k: 20, n_context: 5, tau: 0.35 }
+# tau calibrated 2026-08-24 against the full 8-doc index and the 44-question golden set
+# (BLOCKERS #8). Measured cosine top-1: answerable 0.547-0.783, unanswerable 0.443-0.692 —
+# the two overlap, so no threshold separates them cleanly. 0.50 is the best free operating
+# point: it declines 2 of the 5 unanswerable questions and costs 0 answerable ones. Raising
+# it to 0.60 catches 4 of 5 but loses 6 answerable, which is the wrong trade for a study aid.
+# Retrieval metrics are unaffected either way — recall is scored before the abstain decision.
+retrieve: { k: 20, n_context: 5, tau: 0.50 }
 generate: { max_new_tokens: 512, temperature: 0.2 }
 
 paths:

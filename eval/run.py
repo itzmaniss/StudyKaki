@@ -56,7 +56,7 @@ class EvalResult:
     recall_at_5: float
     recall_at_10: float
     mrr_at_10: float
-    abstain_precision: float
+    abstain_precision: float | None
     groundedness: float | None
     retriever: str
 
@@ -67,7 +67,7 @@ class EvalResult:
             f"{self.recall_at_5:.3f}",
             f"{self.recall_at_10:.3f}",
             f"{self.mrr_at_10:.3f}",
-            f"{self.abstain_precision:.3f}",
+            "n/a" if self.abstain_precision is None else f"{self.abstain_precision:.3f}",
             "n/a" if self.groundedness is None else f"{self.groundedness:.3f}",
         ]
         widths = [max(len(c), len(v)) for c, v in zip(cols, vals, strict=True)]
@@ -143,11 +143,14 @@ def evaluate(
     ans = [r for r in rows if r["answerable"]]
     abstained_rows = [r for r in rows if r["abstained"]]
 
-    # Of everything we declined to answer, how much *should* have been declined.
+    # Of everything we declined to answer, how much *should* have been declined. None, not
+    # 1.0, when nothing was declined: a system that answers everything has not achieved
+    # perfect abstain precision, it has abstained zero times, and printing 1.000 for that
+    # reads as the strongest possible score for the weakest possible behaviour (§0.6).
     abstain_precision = (
         mean([1.0 if not r["answerable"] else 0.0 for r in abstained_rows])
         if abstained_rows
-        else 1.0
+        else None
     )
 
     result = EvalResult(

@@ -22,7 +22,7 @@ def test_base_config_loads():
     cfg = load_config(DEFAULT_CONFIG)
     assert cfg.chunk.target_tokens == 400
     assert cfg.retrieve.k == 20
-    assert cfg.retrieve.tau == 0.35
+    assert cfg.retrieve.tau == 0.50
     assert cfg.models.generator.precision == "int4"
 
 
@@ -43,7 +43,11 @@ def test_chunk_hash_ignores_unrelated_tuning(tmp_path):
     """Retuning tau must not invalidate the chunk cache."""
 
     def bump_tau(d):
-        d["retrieve"]["tau"] = 0.5
+        # Derived, not a literal: pinning a number here makes the test silently become a
+        # no-op the day base.yaml is retuned to that same number, which is what happened when
+        # tau moved to 0.50. Halving is distinct for any tau > 0 and stays inside [0, 1];
+        # 1 - tau is not — it is a fixed point at exactly 0.5.
+        d["retrieve"]["tau"] = round(d["retrieve"]["tau"] / 2, 4)
 
     a = load_config(write_cfg(tmp_path))
     b = load_config(write_cfg(tmp_path, bump_tau))

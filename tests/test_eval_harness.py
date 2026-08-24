@@ -319,3 +319,27 @@ def test_recall_counts_a_twin_hit():
     hits = [Retrieved(chunk=chunk("ta1", 42), score=0.9, rank=1)]
     assert recall_at(hits, gold, 1) == 1.0
     assert reciprocal_rank(hits, gold, 10) == 1.0
+
+
+def test_abstaining_on_nothing_is_not_perfect_abstain_precision():
+    """Answering everything is the weakest behaviour, not the strongest score (§0.6)."""
+    cfg = load_config()
+    result, _ = evaluate(AlwaysHits(), _golden_one(), cfg, label="t")
+    assert result.abstain_precision is None
+    assert "n/a" in result.as_table()
+
+
+def test_abstain_precision_is_scored_once_something_is_declined():
+    cfg = load_config()
+    golden = [
+        GoldQuestion(q="answerable", lang="en", doc_id="d1", gold_pages=[42]),
+        GoldQuestion(q="unanswerable", lang="en", doc_id="d1", gold_pages=[]),
+    ]
+
+    class BelowTau:
+        def retrieve(self, query: str, k: int):
+            return [Retrieved(chunk=chunk(page=42), score=0.01, rank=1)]
+
+    result, _ = evaluate(BelowTau(), golden, cfg, label="t")
+    # both abstained, one of them correctly
+    assert result.abstain_precision == pytest.approx(0.5)
