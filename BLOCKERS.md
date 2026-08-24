@@ -974,3 +974,68 @@ changes the V1 answer path, which should not happen on the strength of a retriev
 alone.
 
 Blocked file: `answer/generate.py:_run` (the `abstains(hits, tau)` call).
+
+---
+
+## 13. Rerank costs 5-11s per query, not §10's 1-2s — and TextRerankPipeline is unusable on arm64
+
+Two separate findings from wiring the §10 rerank arm.
+
+### 13a. `openvino_genai.TextRerankPipeline` cannot be used on this machine — RESOLVED, worked around
+
+It loads without error and then throws on **every** `rerank()` call:
+
+```
+Node UnigramTokenizer_789260 of type Reference
+Tensor data with element type f16, is not representable as pointer to f32
+```
+
+Same arm64 trap `ingest/embed.py` already documents: openvino_tokenizers' custom ops are
+reference implementations that read weights as f32, and the CPU plugin defaults
+`INFERENCE_PRECISION_HINT` to f16 here (BLOCKERS #1 — this box is an M4 Pro, not the Intel
+target). The embedder fixes it by pinning the hint on the tokenizer compile.
+
+**TextRerankPipeline gives you no way to do that.** Tried: `**kwargs` on the constructor
+(reaches the model compile, not the tokenizer), and `ov.Core().set_property("CPU", ...)`
+before construction (GenAI uses its own Core). Both still fail.
+
+Worked around by driving the model directly — `core.compile_model` on the cross-encoder plus
+our own pair tokenizer compiled with the f32 hint, which is the pattern `ingest/embed.py`
+already uses. This also required re-converting the tokenizer with `number_of_inputs=2`, since
+a cross-encoder scores (query, passage) pairs rather than one sequence.
+
+**This is very likely dev-machine-only.** On the Intel target the CPU default is f32 and
+`TextRerankPipeline` should work as §10 assumes. The direct path works on both, so it stays.
+
+### 13b. The latency budget in §10 is off by 10x for our chunk size — NEEDS A DECISION
+
+§10 says "20 cross-encoder passes on CPU is ~1-2s". Measured here, bge-reranker-v2-m3 INT8:
+
+| batch | seq len | wall |
+|---|---|---|
+| 20 pairs | 613 tok | 11.5 s |
+| 10 pairs | 613 tok | 5.6 s |
+| 5 pairs | 613 tok | 2.8 s |
+
+~550 ms per pair, linear in batch. On real corpus chunks a full top-20 rerank measured
+**29.3 s**. Tokenization is not the cost (187 ms); the model is.
+
+The estimate assumed short passages. Our chunks are `target_tokens: 400`, so each pair is
+~600 tokens — roughly 10x the work §10 priced in.
+
+`top_n` is already cut from 20 to 10, which is free: `v1.json`'s rank distribution puts the
+correct chunk at rank 11-20 exactly zero times. That gets it to ~5.6 s. Still 3x over budget.
+
+§10's own mitigation is "put it on iGPU" — **there is no iGPU here** (BLOCKERS #1).
+
+**Need a decision, once the quality number lands:**
+1. Ship rerank only if the recall gain justifies ~5.6 s added latency. For a study tool where
+   TTFT is the pitch, that is likely a no.
+2. Re-chunk smaller (`target_tokens` 200) so pairs are ~300 tokens. Halves rerank cost but
+   **invalidates the index and every cached stage**, and moves the dense baseline too — so it
+   is not a rerank-only decision.
+3. Cut `top_n` to 5 (~2.8 s). The rank distribution says rank 2-5 holds 14 of 49 correct
+   chunks, so this keeps most of the available headroom.
+4. Drop rerank; take hybrid's +0.041 for ~1 ms and spend the time elsewhere.
+
+Measured on an M4 Pro. The Intel target is slower, so these are optimistic.
