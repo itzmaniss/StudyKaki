@@ -250,3 +250,46 @@ cannot ship behind `answer/`) and **#13** (rerank costs 5-11 s/query, ~10x §10'
 because our chunks are 400 tokens; §10's iGPU mitigation does not exist on this box).
 
 Next: rerank quality numbers, then a decision on #12 and #13 before anything merges to main.
+
+## 2026-08-25 01:05 — §10 sweep results, all arms working
+
+54 questions, pinned index `73677e03`, retrieval only. **0 degraded calls across 108 rerank
+invocations**, so these are real measurements (the first sweep's rerank row was not — see below).
+
+```
+arm                       recall@5        Δ   MRR@10        Δ     ms/q
+dense (V1)                   0.898   -0.000    0.736   -0.000       37
+hybrid                       0.939   +0.041    0.774   +0.038       34
+rerank                       0.918   +0.020    0.891   +0.155     6781
+rerank+hybrid                0.980   +0.082    0.917   +0.181     7614
+rewrite                      0.898   -0.000    0.736   -0.000     1143
+hybrid+rewrite               0.939   +0.041    0.774   +0.038     1070
+```
+
+**`rerank+hybrid` reaches recall@5 = 0.980, which is the corpus ceiling, not just a good
+number.** `v1.json` records recall@10 == recall@20 == 0.9796 and one answerable question whose
+gold chunk is never retrieved at any depth — so 48/49 is the maximum any retriever can score
+here. The +0.082 headroom predicted from the baseline rank distribution is now fully consumed.
+
+The bigger shift is MRR@10: 0.736 -> 0.917. The correct chunk is now nearly always rank 1, and
+that is rerank's doing (it alone moves MRR +0.155 while moving recall only +0.020). It reorders
+7.9 of 10 candidates on an average query — it is not a tiebreaker, it is re-deciding the top.
+
+Division of labour is clean: **hybrid widens the candidate pool** (recall), **rerank orders it**
+(precision). Neither substitutes for the other, which is why the combination hits the ceiling
+and either alone does not.
+
+Cost: rerank is **7.1 s mean, 2.6-17.1 s range** at `top_n: 10`. Hybrid is free (~1 ms of BM25;
+its 34 ms/q is dense's own latency). See BLOCKERS #13 — this is ~10x §10's estimate because our
+chunks are 400 tokens, so each pair is ~600.
+
+Also this session: `eval+retrieve: never report a number an arm did not produce` (`149d6f6`).
+The previous sweep printed rerank at 0.898 with no gain. That was not a result — the arm threw
+on all 54 questions and degraded to its inner ranking. Arms now count degraded calls and the
+sweep withholds metrics for any row with a non-zero count.
+
+Verified: `uv run pytest` -> **817 passed, 8 skipped**, ruff + `uv lock --check` clean.
+Sweep parquet: `data/eval/sweep_rerank.parquet`.
+
+Next: groundedness on `rerank+hybrid` is the remaining half of the §10 gate — retrieval is only
+one of the two metrics it cuts on. ~80 min. Nothing merges to main before that.
