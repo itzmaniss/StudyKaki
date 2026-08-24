@@ -334,3 +334,43 @@ def test_cached_result_is_identical_to_the_uncached_one(tmp_path):
     assert chunk_blocks(blocks, DEFAULT, cache=StageCache(tmp_path / "c")) == chunk_blocks(
         blocks, DEFAULT
     )
+
+
+def test_a_chapter_label_section_folds_into_what_it_labels():
+    """`_merge_short` cannot reach across sections, so this shipped at two tokens (chunk/2).
+
+    Textbooks split the chapter number and its title into two sibling heading blocks, so
+    `_is_redundant` sees equal depth and keeps both.
+    """
+    blocks = [
+        block(0, "CHAPTER 6", kind="heading"),
+        block(1, "CLASSES AND OBJECTS", kind="heading"),
+        block(2, words(300, "a")),
+    ]
+    chunks = chunk_blocks(blocks, DEFAULT)
+    assert all(c.token_count >= DEFAULT.min_tokens for c in chunks)
+    assert "CHAPTER 6" in chunks[0].text
+    assert chunks[0].heading_path[0] == "CLASSES AND OBJECTS"
+
+
+def test_a_trailing_bare_heading_keeps_its_own_path():
+    blocks = [
+        block(0, "3.1 Light Reactions", kind="heading"),
+        block(1, words(100, "a")),
+        block(2, "Appendix", kind="heading"),
+    ]
+    chunks = chunk_blocks(blocks, DEFAULT)
+    assert chunks[-1].heading_path == ["Appendix"]
+
+
+def test_min_tokens_holds_across_section_boundaries():
+    blocks = [
+        block(0, "CHAPTER 1", kind="heading"),
+        block(1, "UNIT ONE", kind="heading"),
+        block(2, "TITLE", kind="heading"),
+        block(3, words(300, "a")),
+    ]
+    chunks = chunk_blocks(blocks, DEFAULT)
+    assert len(chunks) == 1
+    for label in ("CHAPTER 1", "UNIT ONE"):
+        assert label in chunks[0].text

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 import structlog
@@ -37,7 +37,7 @@ from ingest.normalize import lang_for_script
 
 log = structlog.get_logger(__name__)
 
-STAGE_VERSION = "chunk/1"
+STAGE_VERSION = "chunk/2"
 
 BLOCK_SEPARATOR = "\n\n"
 
@@ -158,13 +158,61 @@ def _merge_short(groups: list[list[Block]], min_tokens: int) -> list[list[Block]
     """
     merged: list[list[Block]] = []
     for group in groups:
-        tokens = sum(count_tokens(b.text, b.script) for b in group)
-        if merged and tokens < min_tokens:
+        if merged and _tokens(group) < min_tokens:
             seen = {b.block_id for b in merged[-1]}
             merged[-1].extend(b for b in group if b.block_id not in seen)
         else:
             merged.append(list(group))
     return merged
+
+
+def _tokens(blocks: Iterable[Block]) -> int:
+    return sum(count_tokens(b.text, b.script) for b in blocks)
+
+
+def _dedup(blocks: Iterable[Block]) -> list[Block]:
+    seen: set[str] = set()
+    out: list[Block] = []
+    for b in blocks:
+        if b.block_id not in seen:
+            seen.add(b.block_id)
+            out.append(b)
+    return out
+
+
+def _fold_orphans(
+    pairs: list[tuple[list[Block], tuple[str, ...]]], min_tokens: int
+) -> list[tuple[list[Block], tuple[str, ...]]]:
+    """Second pass, across section boundaries, so `min_tokens` holds for the whole document.
+
+    `_merge_short` can only fold a group into a predecessor *within its own section*. A section
+    that is nothing but one short group therefore has no predecessor and ships whatever its
+    size — and that is the common case, not a corner: most textbooks put the chapter number and
+    the chapter title in two separate heading blocks, which `_sections` reads as two sibling
+    sections, so "CHAPTER 6" indexes as a two-token chunk. Twelve of those in one volume are
+    twelve near-identical vectors that match any query containing the word chapter.
+
+    Folding **forward** is what keeps this honest: an orphan section labels what comes after
+    it, so it joins the following chunk and inherits that chunk's heading path. A *trailing*
+    orphan labels nothing and is left alone — `_is_redundant` already decided that case, and
+    its text survives nowhere else.
+    """
+    out: list[tuple[list[Block], tuple[str, ...]]] = []
+    pending: list[Block] = []
+    pending_path: tuple[str, ...] = ()
+    for group, path in pairs:
+        if pending:
+            group = _dedup([*pending, *group])
+        else:
+            pending_path = path
+        pending = []
+        if _tokens(group) < min_tokens:
+            pending = list(group)
+            continue
+        out.append((list(group), path))
+    if pending:
+        out.append((pending, pending_path))
+    return out
 
 
 def _bbox_union(blocks: Sequence[Block]) -> BBox:
@@ -233,14 +281,14 @@ def chunk_blocks(
 
         def compute() -> list[Chunk]:
             sections = _sections(ordered)
-            out: list[Chunk] = []
+            pairs: list[tuple[list[Block], tuple[str, ...]]] = []
             for i, section in enumerate(sections):
                 following = sections[i + 1] if i + 1 < len(sections) else None
                 if _is_redundant(section, following):
                     continue
-                groups = _merge_short(_pack(section.blocks, params), params.min_tokens)
-                out.extend(_build(group, section.heading_path) for group in groups)
-            return out
+                for group in _merge_short(_pack(section.blocks, params), params.min_tokens):
+                    pairs.append((group, section.heading_path))
+            return [_build(group, path) for group, path in _fold_orphans(pairs, params.min_tokens)]
 
         if cache is None:
             result = compute()
