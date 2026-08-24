@@ -54,7 +54,7 @@ DETOKENIZER_XML_NAME = "openvino_detokenizer.xml"
 # graph readable by OpenVINO's ONNX frontend without opset-upgrade churn.
 PADDLE_ONNX_OPSET = 14
 
-Kind = Literal["hf_encoder", "hf_causal_lm", "paddle"]
+Kind = Literal["hf_encoder", "hf_causal_lm", "hf_reranker", "paddle"]
 
 
 class ConversionError(RuntimeError):
@@ -100,6 +100,16 @@ SOURCES: dict[str, ModelSource] = {
             "passage_prefix": "",
         },
         ignore_patterns=("onnx/*", "*.onnx", "*.onnx_data", "imgs/*", "*.msgpack", "*.h5"),
+    ),
+    "bge-reranker-v2-m3": ModelSource(
+        name="bge-reranker-v2-m3",
+        role="reranker",
+        kind="hf_reranker",
+        hf_id="BAAI/bge-reranker-v2-m3",
+        hf_revision="953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+        # No `embedding` block: a cross-encoder emits one relevance logit, not a vector, so
+        # it has no §3.1 fingerprint and cannot invalidate the index.
+        ignore_patterns=("onnx/*", "*.onnx", "*.onnx_data", "*.msgpack", "*.h5"),
     ),
     "qwen3-4b-instruct": ModelSource(
         name="qwen3-4b-instruct",
@@ -278,6 +288,51 @@ def convert_encoder(src: ModelSource, precision: str, out_root: Path) -> Path:
     )
     ov_model = _compress(ov_model, precision, src.name)
     _save(ov_model, ir_dir, precision)
+
+    tokenizer = AutoTokenizer.from_pretrained(snapshot)
+    tokenizer.save_pretrained(ir_dir)
+    _save_ov_tokenizer(tokenizer, ir_dir, with_detokenizer=False)
+    return ir_dir
+
+
+def convert_reranker(src: ModelSource, precision: str, out_root: Path) -> Path:
+    """Cross-encoder for GenAI's `TextRerankPipeline` (§10).
+
+    Exported through optimum-intel rather than the PyTorch frontend used by
+    `convert_encoder`: TextRerankPipeline expects optimum's sequence-classification layout
+    (config.json + openvino_model.xml + tokenizer), and a hand-rolled graph does not load.
+    """
+    try:
+        from optimum.intel import OVModelForSequenceClassification
+    except ImportError as e:
+        raise ConversionError(
+            f"{src.name}: optimum-intel cannot be imported ({e}) — see convert_causal_lm "
+            f"for the torch pin this usually needs."
+        ) from e
+
+    if precision not in ("int8", "fp32", "fp16"):
+        raise ConversionError(f"{src.name}: unsupported reranker precision {precision!r}")
+
+    snapshot = snapshot_dir(src)
+    ir_dir = _ir_dir(src, precision, out_root)
+
+    log.info("convert.export_reranker", model=src.name, precision=precision)
+    ov_model = OVModelForSequenceClassification.from_pretrained(snapshot, export=True)
+    ir_dir.mkdir(parents=True, exist_ok=True)
+    ov_model.save_pretrained(ir_dir)
+
+    if precision == "int8":
+        # Weight-only INT8 after export: the reranker is 568M params and runs 20 passes per
+        # query, so the size cut is what keeps §10's 1-2s CPU budget reachable.
+        import nncf
+
+        model_xml = ir_dir / IR_XML_NAME
+        compressed = nncf.compress_weights(
+            ov.Core().read_model(model_xml), mode=nncf.CompressWeightsMode.INT8_ASYM
+        )
+        ov.save_model(compressed, model_xml)
+
+    from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(snapshot)
     tokenizer.save_pretrained(ir_dir)
@@ -471,6 +526,7 @@ def regenerate_tokenizer(name: str, cfg: Config, *, out_root: Path = IR_ROOT) ->
 _CONVERTERS = {
     "hf_encoder": convert_encoder,
     "hf_causal_lm": convert_causal_lm,
+    "hf_reranker": convert_reranker,
     "paddle": convert_paddle,
 }
 
