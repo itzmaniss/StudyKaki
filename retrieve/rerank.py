@@ -20,24 +20,34 @@ import structlog
 
 from core.config import Config
 from core.schema import Retrieved
+from ingest.embed import TOKENIZER_OV_CONFIG
+from models.registry import IR_XML_NAME
 from retrieve.retriever import Retriever
 
 log = structlog.get_logger("retrieve.rerank")
 
 CPU = "CPU"
+TOKENIZER_XML_NAME = "openvino_tokenizer.xml"
 
 
 class RerankError(RuntimeError):
     """Reranking failed. Always names the model and device."""
 
 
-def load_rerank_pipeline(
+def load_reranker(
     cfg: Config,
     *,
     manifest_path: str | Path | None = None,
-) -> tuple[Any, str, str]:
-    """Build GenAI's `TextRerankPipeline` with the §7.4 device fallback."""
-    import openvino_genai as genai
+) -> tuple[Any, Any, str, str]:
+    """Compile the cross-encoder and its pair tokenizer, with the §7.4 device fallback.
+
+    Not `openvino_genai.TextRerankPipeline`: that compiles its own tokenizer with no way to
+    pass a precision hint, so on arm64 it loads fine and then dies on every call with
+    "element type f16, is not representable as pointer to f32" (BLOCKERS #1, #13). Driving
+    the model directly is the same fix ingest/embed.py already uses for the embedder.
+    """
+    import openvino as ov
+    import openvino_tokenizers as ovt
 
     from models.registry import ModelNotFound, load_manifest, ov_version, select_device, spec_for
 
@@ -57,11 +67,22 @@ def load_rerank_pipeline(
             runtime=ov_version(),
         )
 
+    core = ov.Core()
+    try:
+        core.add_extension(str(ovt._ext_path))
+    except (RuntimeError, AttributeError) as e:
+        log.warning("rerank.tokenizer_extension_not_registered", error=str(e))
+
+    tok_xml = entry.ir_dir / TOKENIZER_XML_NAME
+    if not tok_xml.is_file():
+        raise RerankError(f"{entry.name}: pair tokenizer missing at {tok_xml} — re-run convert")
+    tokenizer = core.compile_model(str(tok_xml), CPU, TOKENIZER_OV_CONFIG)
+
     requested = select_device(spec.device)
     last: Exception | None = None
     for device in dict.fromkeys((requested, CPU)):
         try:
-            pipe = genai.TextRerankPipeline(str(entry.ir_dir), device)
+            model = core.compile_model(str(entry.ir_dir / IR_XML_NAME), device)
         except (RuntimeError, OSError) as e:
             last = e
             log.warning("rerank.load_failed", model=entry.name, device=device, error=str(e))
@@ -73,11 +94,10 @@ def load_rerank_pipeline(
             device=device,
             fell_back=device != spec.device,
         )
-        return pipe, entry.name, device
+        return model, tokenizer, entry.name, device
 
     raise RerankError(
-        f"{entry.name}: TextRerankPipeline would not load on {requested} or {CPU} — "
-        f"last error: {last}"
+        f"{entry.name}: cross-encoder would not load on {requested} or {CPU} — last error: {last}"
     )
 
 
@@ -92,21 +112,23 @@ class RerankingRetriever:
         *,
         models_manifest_path: str | Path | None = None,
     ) -> RerankingRetriever:
-        pipe, name, device = load_rerank_pipeline(cfg, manifest_path=models_manifest_path)
-        return cls(inner, cfg, pipe, name=name, device=device)
+        model, tokenizer, name, device = load_reranker(cfg, manifest_path=models_manifest_path)
+        return cls(inner, cfg, model, tokenizer, name=name, device=device)
 
     def __init__(
         self,
         inner: Retriever,
         cfg: Config,
-        pipe: Any,
+        model: Any,
+        tokenizer: Any,
         *,
         name: str = "reranker",
         device: str = CPU,
     ) -> None:
         self.inner = inner
         self.cfg = cfg
-        self.pipe = pipe
+        self.model = model
+        self.tokenizer = tokenizer
         self.name = name
         self.device = device
 
@@ -151,12 +173,10 @@ class RerankingRetriever:
         return reranked
 
     def _score(self, query: str, texts: list[str]) -> list[float]:
-        """GenAI returns (index, score) pairs, not scores in input order — restore the order."""
-        out = self.pipe.rerank(query, texts)
-        scores = [0.0] * len(texts)
-        for item in out:
-            # Test `score`, not `index`: every tuple has an `.index` *method*, so probing for
-            # that picks the object branch for plain pairs and blows up on `.score`.
-            idx, score = (item.index, item.score) if hasattr(item, "score") else item
-            scores[int(idx)] = float(score)
-        return scores
+        """One relevance logit per (query, text) pair. Higher is better; not a probability."""
+        import numpy as np
+
+        encoded = self.tokenizer([np.array([query] * len(texts)), np.array(texts)])
+        feed = {name: encoded[name] for name in ("input_ids", "attention_mask")}
+        logits = self.model(feed)[self.model.output(0)]
+        return [float(v) for v in np.asarray(logits).reshape(len(texts), -1)[:, 0]]

@@ -331,7 +331,8 @@ def convert_reranker(src: ModelSource, precision: str, out_root: Path) -> Path:
 
     tokenizer = AutoTokenizer.from_pretrained(snapshot)
     tokenizer.save_pretrained(ir_dir)
-    _save_ov_tokenizer(tokenizer, ir_dir, with_detokenizer=False)
+    # Two string inputs: a cross-encoder scores (query, passage), not one sequence.
+    _save_ov_tokenizer(tokenizer, ir_dir, with_detokenizer=False, number_of_inputs=2)
     return ir_dir
 
 
@@ -457,7 +458,9 @@ def convert_paddle(src: ModelSource, precision: str, out_root: Path) -> Path:
     return ir_dir
 
 
-def _save_ov_tokenizer(tokenizer: Any, ir_dir: Path, *, with_detokenizer: bool) -> None:
+def _save_ov_tokenizer(
+    tokenizer: Any, ir_dir: Path, *, with_detokenizer: bool, number_of_inputs: int = 1
+) -> None:
     """§0.4 — every model runs through OpenVINO, tokenisers included.
 
     Saved **uncompressed**. `ov.save_model` defaults to `compress_to_fp16=True`, which is
@@ -473,7 +476,9 @@ def _save_ov_tokenizer(tokenizer: Any, ir_dir: Path, *, with_detokenizer: bool) 
         log.warning("convert.ov_tokenizer_unavailable", ir_dir=str(ir_dir), error=str(e))
         return
     try:
-        converted = convert_tokenizer(tokenizer, with_detokenizer=with_detokenizer)
+        converted = convert_tokenizer(
+            tokenizer, with_detokenizer=with_detokenizer, number_of_inputs=number_of_inputs
+        )
     except (RuntimeError, TypeError, NotImplementedError, OSError) as e:
         log.warning("convert.ov_tokenizer_failed", ir_dir=str(ir_dir), error=str(e))
         return

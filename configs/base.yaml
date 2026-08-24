@@ -37,7 +37,9 @@ retrieve:
   tau: 0.45
   # §10 V2 arms — all off, so this file is the V1 baseline the before/after numbers compare
   # against. eval/sweep.py flips them; nothing here changes without a number to justify it.
-  rerank:  { enabled: false, top_n: 20 }
+  # top_n 10, not 20: v1.json's rank distribution puts the correct chunk at rank 11-20
+  # exactly zero times, so reranking deeper buys nothing and doubles the cost (§10).
+  rerank:  { enabled: false, top_n: 10 }
   hybrid:  { enabled: false, rrf_k: 60, dense_weight: 1.0, lexical_weight: 1.0 }
   rewrite: { enabled: false, trigger_max_tokens: 5 }
 
