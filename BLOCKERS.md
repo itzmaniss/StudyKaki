@@ -941,3 +941,36 @@ provenance — a citation pointing at a page whose text the model was never show
 **For the developer:** the budget of 6000 is set below the observed 6.5k–10.4k failure window,
 not measured against it. The bisection only bracketed the ceiling; nobody has found the exact
 edge. If Tamil answers look thin, 6000 is the first number to raise.
+
+---
+
+## 12. Hybrid retrieval cannot answer — RRF scores are not similarities
+
+`retrieve/fusion.py:HybridRetriever` measures fine and **cannot be put behind
+`answer/generate.py` as it stands.**
+
+RRF scores come from ranks, not cosine. Best possible for one list is `1/(60+1)` ≈ 0.016;
+with two arms the top hit lands near 0.03. `cfg.retrieve.tau` is 0.45. So
+`retriever.abstains(hits, tau)` returns True for **every** query, and the whole system
+abstains the moment the hybrid arm is switched on.
+
+This does not affect the sweep: `recall@k` and `mrr@10` are pure rank metrics and never read
+`score`. It affects `abstain_precision`, and everything downstream of generation.
+
+**Tried:** returning cosine on fused hits instead. Does not work — a chunk found only by the
+lexical arm has no cosine score, and the `Retriever` protocol says hits are sorted by
+descending score, which fused-by-RRF/scored-by-cosine would violate.
+
+**Need a decision between:**
+1. Abstain on the dense arm's top score, ignoring lexical. `HybridRetriever.last_dense_top_score`
+   already exposes it; `answer/generate.py` would consult the retriever rather than the hits.
+   Keeps tau's calibration (BLOCKERS #8 — the safe window is 0.01 wide) but means a
+   lexical-only hit can never rescue a query dense wanted to abstain on.
+2. Recalibrate a separate `tau_rrf` against the golden set. Honest, but #8 showed tau is
+   knife-edge on this corpus and there is no reason to think an RRF threshold is less so.
+
+Option 1 is cheaper and preserves a calibration that took real work. Not implemented — it
+changes the V1 answer path, which should not happen on the strength of a retrieval number
+alone.
+
+Blocked file: `answer/generate.py:_run` (the `abstains(hits, tau)` call).
