@@ -586,3 +586,36 @@ which is worse.
 
 **Need:** the golden set. Once 40-60 questions exist against this corpus, `abstain_precision`
 picks `tau` directly. Until then the demo will answer questions it should decline.
+
+---
+
+## 10. Two golden labels were wrong, and the way I built them explains how
+
+Found by the developer reviewing the check sheet, 2026-08-24. Both replaced.
+
+| was | why it failed |
+|---|---|
+| "What is the difference between hard formatting and soft formatting?" `vol1_en` p[39,43] | Lifted from the book's own *"III. Answer the following"* exercise list on p43. The phrase occurs exactly twice in the whole volume — p41 says two types exist, p43 asks the question — and it is **never defined**. The page numbers were wrong too: the bullet is on p41, not p39. |
+| "What does the address-of operator & do?" `vol2_en` p[48] | p48 carries the heading *"The '&' operator:"* but the prose under it describes what happens when you declare `int num1=10`, not what `&` does. The program below prints `&i`, so it is inferable, but the page never states it. |
+
+Replaced with facts the page states outright: default margins (`vol1_en` p59) and the seven kinds
+of basic statement (`vol2_en` p62). Both retrieve at rank 1.
+
+**Root cause, which matters more than the two labels.** I wrote the set from a 300-character
+per-page digest. That is enough to see what a page is *about*, and not enough to confirm it
+*answers* a question — so a page discussing formatting styles looked like it covered hard vs soft
+formatting. A page-level topic match is not an answer.
+
+**The failure was silent.** Both questions *passed* before the fix: they scored recall@1 = 1.0
+against pages that do not contain the answer. Correcting them did not move a single headline
+number. A bad label does not show up as a bad score, which is exactly why the numbers cannot
+validate the labels and a human review was the only way to catch this.
+
+Rate: 2 of 44 (4.5%) failed review. A sweep for the same error class — gold pages dominated by
+`Exercises` / `Answer the following` / `Fill in the blanks` furniture — found only these, so it is
+not believed to be systemic. The remaining 42 have not been independently checked.
+
+**Available if wanted:** the hard/soft formatting question is an unusually good *unanswerable*
+candidate — the exact terms appear in the corpus, so retrieval scores high, but nothing answers
+it. That is the failure mode #8 is still open on. Not added, because whether p41's "there are two
+types" counts as an answer is arguable, and the 5 existing unanswerables are unambiguous.

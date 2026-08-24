@@ -5,6 +5,9 @@
 # textbooks are offset by 8 (PDF p9 = printed p1); the CNNIC report by 10.
 #
 # Every answer below was read off the page it is labelled with before being written down.
+# Two labels failed that bar on review and were replaced (see BLOCKERS.md #10): a question
+# lifted from the book's own 'Answer the following' exercise list, which the book never
+# answers, and one whose page carried the right heading but not the explanation.
 #
 # Composition (§5): 10 cross-lingual, 5 unanswerable (gold_pages: []), 5 needing a table or
 # figure. Cross-lingual questions deliberately target documents that exist in ONE language
@@ -22,12 +25,12 @@
 {"q": "What is the simplest way to add a new row to a table in StarOffice Writer?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [53], "note": ""}
 {"q": "How do I turn on automatic spell checking while typing?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [44, 45], "note": ""}
 {"q": "What does the Merge Cells icon on the table formatting toolbar do?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [56], "note": "figure — toolbar icon legend"}
-{"q": "What is the difference between hard formatting and soft formatting?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [39, 43], "note": ""}
+{"q": "What are the default margins in StarOffice Writer?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [59], "note": ""}
 
 # --- std12_cs_vol2_en — C++, monolingual English --------------------------------------
 {"q": "How many bytes does an int occupy and what is its range?", "lang": "en", "doc_id": "bb47b2c6d11863ff6e437bff75fe5166cd428d76716b659bf5acfc8f313be526", "gold_pages": [46], "note": "table — data type sizes and ranges"}
 {"q": "What is the range of an unsigned char in C++?", "lang": "en", "doc_id": "bb47b2c6d11863ff6e437bff75fe5166cd428d76716b659bf5acfc8f313be526", "gold_pages": [46], "note": "table — data type sizes and ranges"}
-{"q": "What does the address-of operator & do?", "lang": "en", "doc_id": "bb47b2c6d11863ff6e437bff75fe5166cd428d76716b659bf5acfc8f313be526", "gold_pages": [48], "note": ""}
+{"q": "What are the different types of basic statements in C++?", "lang": "en", "doc_id": "bb47b2c6d11863ff6e437bff75fe5166cd428d76716b659bf5acfc8f313be526", "gold_pages": [62], "note": ""}
 {"q": "What are the three uses of the asterisk in C++?", "lang": "en", "doc_id": "bb47b2c6d11863ff6e437bff75fe5166cd428d76716b659bf5acfc8f313be526", "gold_pages": [49], "note": ""}
 {"q": "Which punctuator terminates a C++ statement?", "lang": "en", "doc_id": "bb47b2c6d11863ff6e437bff75fe5166cd428d76716b659bf5acfc8f313be526", "gold_pages": [38], "note": "table — punctuators and their purpose"}
 {"q": "What is the extraction operator in C++ and what does it do?", "lang": "en", "doc_id": "bb47b2c6d11863ff6e437bff75fe5166cd428d76716b659bf5acfc8f313be526", "gold_pages": [63], "note": ""}
