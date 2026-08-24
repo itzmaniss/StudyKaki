@@ -41,7 +41,9 @@ retrieve:
   hybrid:  { enabled: false, rrf_k: 60, dense_weight: 1.0, lexical_weight: 1.0 }
   rewrite: { enabled: false, trigger_max_tokens: 5 }
 
-generate: { max_new_tokens: 512, temperature: 0.2 }
+# max_prompt_tokens: see core/config.py — OpenVINO INT4 CPU MatMul fails above ~7k tokens,
+# and Tamil hits that first because it tokenizes ~2x denser than English (BLOCKERS #11).
+generate: { max_new_tokens: 512, temperature: 0.2, max_prompt_tokens: 6000 }
 
 paths:
   data_dir: data

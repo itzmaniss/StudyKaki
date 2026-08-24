@@ -879,3 +879,44 @@ not believed to be systemic. The remaining 42 have not been independently checke
 candidate — the exact terms appear in the corpus, so retrieval scores high, but nothing answers
 it. That is the failure mode #8 is still open on. Not added, because whether p41's "there are two
 types" counts as an answer is arguable, and the 5 existing unanswerables are unambiguous.
+
+---
+
+## 11. The Tamil corpus is unanswerable end-to-end: prompt overflows OpenVINO's CPU MatMul
+
+Found 2026-08-24 running `eval/run.py --groundedness`. It failed on question 45 — the **first
+Tamil question** — with:
+
+```
+GenerationError: qwen3-4b-instruct: generation failed on CPU:
+[CPU] MatMul node 'Multiply_156855' could not create a primitive descriptor for the matmul primitive
+```
+
+Not a model context limit; Qwen3-4B-Instruct-2507 advertises far more. It is an OpenVINO INT4
+CPU limit on this build, and **Tamil reaches it first because Tamil tokenizes roughly twice as
+densely as English**:
+
+| language | chars/token | prompt chars (5 chunks) | prompt tokens | generates? |
+|---|---|---|---|---|
+| zh | 1.62 | 3,303 | 2,042 | yes |
+| en | 2.33 | 10,956 | 4,704 | yes |
+| **ta** | **1.10** | **11,395** | **10,367** | **no** |
+
+Bisected on the failing question: 1 chunk (3,037 tok) works, 2 (5,419) works, 3 (6,537) works,
+5 (10,367) fails. The ceiling is somewhere in 6.5k–10.4k.
+
+**This is a V1 correctness bug, not a V2 concern.** With the shipped `n_context: 5`, *every*
+Tamil question fails to generate — a third of the corpus and the entire multilingual claim.
+Retrieval is unaffected and its numbers stand; only generation breaks.
+
+It also hid behind the retrieval-only eval: `recall@5 = 0.898` looked healthy while the system
+could not answer a single Tamil question. Nothing in the harness exercised generation until
+`--groundedness` was wired.
+
+Worth noting what the model does when the prompt *does* fit: at 1 chunk it answered
+`ஜார்ஜ் பூல் [1]` — correct, and correctly cited. So the capability is there; only the budget is
+missing.
+
+**Fix:** `generate.max_prompt_tokens` (default 6000) added to config; the generation path must
+trim context to that budget and log when it does. Trimming beats failing — an answer from three
+chunks is worth more than an exception from five.

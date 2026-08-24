@@ -106,6 +106,12 @@ class RetrieveConfig(_Strict):
 class GenerateConfig(_Strict):
     max_new_tokens: int = Field(gt=0)
     temperature: float = Field(ge=0.0)
+    #: Hard ceiling on prompt tokens before context is trimmed. Not a model-context limit —
+    #: OpenVINO's INT4 CPU MatMul fails outright above roughly 7k tokens on this build
+    #: ("could not create a primitive descriptor"), and Tamil reaches that first: it tokenizes
+    #: at ~1.1 chars/token against English's 2.33, so five Tamil chunks are ~10.4k tokens where
+    #: five English ones are ~4.7k. Without a budget the whole Tamil corpus is unanswerable.
+    max_prompt_tokens: int = Field(default=6000, gt=0)
 
 
 class PathsConfig(_Strict):

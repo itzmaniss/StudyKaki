@@ -1,0 +1,44 @@
+{
+  "label": "v1-dense-baseline",
+  "date": "2026-08-24",
+  "index_id": "sha256:73677e039adbe1178b006ad2f3027bcb6fbca934ca7257d9be64ed221f5dfd3c",
+  "n_questions": 54,
+  "corpus": {
+    "documents": 8,
+    "pages": 2617,
+    "chunks": 2595,
+    "ocr_documents": 3
+  },
+  "config": {
+    "k": 20,
+    "n_context": 5,
+    "tau": 0.45,
+    "chunk": {
+      "target_tokens": 400,
+      "overlap": 60,
+      "min_tokens": 80
+    },
+    "v2_arms": []
+  },
+  "metrics": {
+    "recall@1": 0.6122,
+    "recall@5": 0.898,
+    "recall@10": 0.9796,
+    "recall@20": 0.9796,
+    "mrr@10": 0.736,
+    "abstain_precision": 1.0,
+    "groundedness": null
+  },
+  "random_floor": {
+    "recall@1": 0.026,
+    "recall@5": 0.077,
+    "recall@10": 0.128,
+    "mrr@10": 0.051
+  },
+  "notes": [
+    "groundedness is null: the run failed on the first Tamil question, OpenVINO INT4 CPU MatMul cannot build a primitive descriptor at ~10.4k prompt tokens (BLOCKERS #11).",
+    "recall@20 == recall@10 exactly: retrieving deeper than 10 adds nothing, so rerank may use top_n 10 for free.",
+    "rank distribution of the correct chunk over 49 answerable: rank1=30, rank2-5=14, rank6-10=4, rank11-20=0, never=1.",
+    "a perfect reranker over top-20 therefore caps at recall@5 = 0.980, i.e. +0.082 headroom on the gating metric."
+  ]
+}
