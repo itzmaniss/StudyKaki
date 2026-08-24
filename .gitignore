@@ -27,3 +27,6 @@ models/ir/
 .pytest_cache/
 .claude-flow/
 .swarm/
+
+# macOS
+.DS_Store
