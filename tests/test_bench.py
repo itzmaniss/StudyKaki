@@ -363,8 +363,16 @@ class TestCLI:
         out = capsys.readouterr().out
         assert "devices:" in out and "peak_RSS_MB" in out
 
-    def test_default_probe_reports_the_missing_model_rather_than_a_number(self, tmp_path, capsys):
-        assert main(["--out-dir", str(tmp_path)]) == 0
+    def test_cli_says_so_when_nothing_was_measured(self, tmp_path, capsys):
+        """§0.5: a missing number is reported, never filled in with a plausible one.
+
+        Driven through `--probe none` rather than the default. The default probe loads the
+        real generator, so this test used to pass only on a machine where the IR happened to
+        be absent — and once it was converted it started doing a 512-token CPU generation
+        inside the unit suite. The missing-model path itself is covered against an injected
+        manifest in `TestGenerationProbe`.
+        """
+        assert main(["--out-dir", str(tmp_path), "--probe", "none"]) == 0
         out = capsys.readouterr().out
         assert "no generation measured" in out
         assert "12.50" not in out

@@ -8,7 +8,13 @@ import pytest
 
 from core.config import load_config
 from core.schema import Chunk, Retrieved
-from eval.metrics import GoldQuestion, first_relevant_rank, recall_at, reciprocal_rank
+from eval.metrics import (
+    GoldQuestion,
+    first_relevant_rank,
+    is_relevant,
+    recall_at,
+    reciprocal_rank,
+)
 from eval.run import RandomRetriever, _pool_from_golden, evaluate, load_golden
 from retrieve.retriever import Retriever, abstains
 
@@ -87,11 +93,22 @@ class TestAbstain:
 
 
 class TestGoldenFile:
-    def test_placeholder_golden_parses(self):
+    def test_golden_set_meets_section_5(self):
         golden = load_golden()
-        assert len(golden) >= 10
-        assert any(g.unanswerable for g in golden), "§5 requires unanswerable questions"
-        assert {g.lang for g in golden} >= {"en", "ta"}
+        assert 40 <= len(golden) <= 60, "§5 wants 40-60 questions"
+        assert sum(g.unanswerable for g in golden) >= 5, "§5 wants 5 unanswerable"
+        assert sum("table" in g.note or "figure" in g.note for g in golden) >= 5
+        assert not any(g.note.startswith("PLACEHOLDER") for g in golden)
+
+    @pytest.mark.xfail(
+        reason="Tamil questions are blocked on the OCR pass — BLOCKERS.md #3", strict=False
+    )
+    def test_golden_covers_all_three_corpus_languages(self):
+        """§5 wants the set spread across all three. Marked xfail rather than weakened, so it
+        turns green by itself the moment the Tamil questions land."""
+        golden = load_golden()
+        assert {g.lang for g in golden} >= {"en", "ta", "zh"}
+        assert sum("cross-lingual" in g.note for g in golden) >= 10
 
     def test_comments_and_blank_lines_skipped(self, tmp_path):
         p = tmp_path / "g.jsonl"
@@ -226,3 +243,79 @@ def test_an_uncited_answer_is_ungrounded():
         AlwaysHits(), _golden_one(), cfg, generator=ScriptedGenerator("just trust me")
     )[0]
     assert result.groundedness == pytest.approx(0.0)
+
+
+# --- parallel translations (BLOCKERS #9) ---------------------------------------------
+
+
+def test_a_question_without_alt_sources_matches_only_its_own_document():
+    """§5's shape is unchanged: one doc_id, and nothing else counts."""
+    gold = GoldQuestion(q="?", lang="en", doc_id="d1", gold_pages=[42])
+    assert gold.doc_ids == ("d1",)
+    assert is_relevant(Retrieved(chunk=chunk("d1", 42), score=1.0, rank=1), gold)
+    assert not is_relevant(Retrieved(chunk=chunk("d2", 42), score=1.0, rank=1), gold)
+
+
+def test_the_translated_twin_counts_as_relevant():
+    row = {"q": "?", "lang": "en", "doc_id": "en1", "gold_pages": [42], "alt_doc_ids": ["ta1"]}
+    gold = GoldQuestion.from_row(row)
+    assert gold.doc_ids == ("en1", "ta1")
+    assert is_relevant(Retrieved(chunk=chunk("ta1", 42), score=1.0, rank=1), gold)
+
+
+def test_a_drifting_translation_keeps_its_own_page_numbers():
+    """std12_cs_vol1_ta runs a page longer than its twin and drifts — sharing one page list
+    would score the correct Tamil page as a miss and the wrong one as a hit."""
+    row = {
+        "q": "?",
+        "lang": "en",
+        "doc_id": "en1",
+        "gold_pages": [42],
+        "alt_doc_ids": {"ta1": [45]},
+    }
+    gold = GoldQuestion.from_row(row)
+    assert gold.pages_for("ta1") == (45,)
+    assert is_relevant(Retrieved(chunk=chunk("ta1", 45), score=1.0, rank=1), gold)
+    # the English page number must NOT match inside the Tamil edition
+    assert not is_relevant(Retrieved(chunk=chunk("ta1", 42), score=1.0, rank=1), gold)
+    # and the primary is unaffected
+    assert is_relevant(Retrieved(chunk=chunk("en1", 42), score=1.0, rank=1), gold)
+
+
+def test_pages_for_reports_no_answer_in_an_unrelated_document():
+    gold = GoldQuestion.from_row(
+        {"q": "?", "lang": "en", "doc_id": "en1", "gold_pages": [42], "alt_doc_ids": ["ta1"]}
+    )
+    assert gold.pages_for("zh1") is None
+
+
+def test_an_unanswerable_question_cannot_name_an_answering_document():
+    with pytest.raises(ValueError, match="must abstain"):
+        GoldQuestion.from_row(
+            {"q": "?", "lang": "en", "doc_id": "en1", "gold_pages": [], "alt_doc_ids": ["ta1"]}
+        )
+
+
+def test_a_duplicate_alt_doc_id_is_rejected():
+    with pytest.raises(ValueError, match="duplicate doc_id"):
+        GoldQuestion.from_row(
+            {"q": "?", "lang": "en", "doc_id": "en1", "gold_pages": [42], "alt_doc_ids": ["en1"]}
+        )
+
+
+def test_a_malformed_alt_doc_ids_is_rejected_not_guessed_at():
+    for bad in ("ta1", 7, [1, 2], {"ta1": "45"}, {"ta1": [4.5]}):
+        with pytest.raises(ValueError):
+            GoldQuestion.from_row(
+                {"q": "?", "lang": "en", "doc_id": "en1", "gold_pages": [42], "alt_doc_ids": bad}
+            )
+
+
+def test_recall_counts_a_twin_hit():
+    """The whole point: retrieving the translation is no longer scored as a miss."""
+    gold = GoldQuestion.from_row(
+        {"q": "?", "lang": "en", "doc_id": "en1", "gold_pages": [42], "alt_doc_ids": ["ta1"]}
+    )
+    hits = [Retrieved(chunk=chunk("ta1", 42), score=0.9, rank=1)]
+    assert recall_at(hits, gold, 1) == 1.0
+    assert reciprocal_rank(hits, gold, 10) == 1.0
