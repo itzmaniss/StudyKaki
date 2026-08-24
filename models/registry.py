@@ -46,10 +46,13 @@ ROLES = (
     # Optional per-script recognition heads (§3). Unset in config means "no dedicated head".
     "ocr_rec_taml",
     "ocr_rec_latn",
+    # §10 cross-encoder. Unset means the rerank arm cannot be switched on (core/config.py
+    # refuses the combination), not that retrieval is broken.
+    "reranker",
 )
 
 #: Roles a config may legitimately leave unset.
-OPTIONAL_ROLES = frozenset({"ocr_rec_taml", "ocr_rec_latn"})
+OPTIONAL_ROLES = frozenset({"ocr_rec_taml", "ocr_rec_latn", "reranker"})
 
 #: §3.1 — the embedder block, in the order the architecture lists it.
 EMBEDDER_FINGERPRINT_KEYS = (
