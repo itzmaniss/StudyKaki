@@ -303,7 +303,7 @@ def convert_reranker(src: ModelSource, precision: str, out_root: Path) -> Path:
     (config.json + openvino_model.xml + tokenizer), and a hand-rolled graph does not load.
     """
     try:
-        from optimum.intel import OVModelForSequenceClassification
+        from optimum.intel import OVModelForSequenceClassification, OVWeightQuantizationConfig
     except ImportError as e:
         raise ConversionError(
             f"{src.name}: optimum-intel cannot be imported ({e}) — see convert_causal_lm "
@@ -317,20 +317,15 @@ def convert_reranker(src: ModelSource, precision: str, out_root: Path) -> Path:
     ir_dir = _ir_dir(src, precision, out_root)
 
     log.info("convert.export_reranker", model=src.name, precision=precision)
-    ov_model = OVModelForSequenceClassification.from_pretrained(snapshot, export=True)
+    # Quantize during export, not after. Post-hoc `nncf.compress_weights` on the saved IR
+    # means reading and writing the same .xml/.bin, which dies mid-write and leaves a model
+    # with no tokenizer beside it — TextRerankPipeline then fails to load.
+    quant = OVWeightQuantizationConfig(bits=8, sym=False) if precision == "int8" else None
+    ov_model = OVModelForSequenceClassification.from_pretrained(
+        snapshot, export=True, quantization_config=quant
+    )
     ir_dir.mkdir(parents=True, exist_ok=True)
     ov_model.save_pretrained(ir_dir)
-
-    if precision == "int8":
-        # Weight-only INT8 after export: the reranker is 568M params and runs 20 passes per
-        # query, so the size cut is what keeps §10's 1-2s CPU budget reachable.
-        import nncf
-
-        model_xml = ir_dir / IR_XML_NAME
-        compressed = nncf.compress_weights(
-            ov.Core().read_model(model_xml), mode=nncf.CompressWeightsMode.INT8_ASYM
-        )
-        ov.save_model(compressed, model_xml)
 
     from transformers import AutoTokenizer
 

@@ -41,6 +41,16 @@
         "passage_prefix": ""
       }
     },
+    "bge-reranker-v2-m3": {
+      "role": "reranker",
+      "hf_id": "BAAI/bge-reranker-v2-m3",
+      "hf_revision": "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+      "precision": "int8",
+      "ir_dir": "ir/bge-reranker-v2-m3-int8",
+      "ir_sha256": "9be78985b458db34d7ac4669382609c3efb87f6b47e12fa9e13a7855f6083da2",
+      "ov_version": "2026.3.0",
+      "converted_at": "2026-08-24T15:20:27Z"
+    },
     "latin_PP-OCRv5_mobile_rec": {
       "role": "ocr_rec_latn",
       "hf_id": "PaddlePaddle/latin_PP-OCRv5_mobile_rec",

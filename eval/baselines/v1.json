@@ -27,7 +27,7 @@
     "recall@20": 0.9796,
     "mrr@10": 0.736,
     "abstain_precision": 1.0,
-    "groundedness": null
+    "groundedness": 0.844
   },
   "random_floor": {
     "recall@1": 0.026,
@@ -36,7 +36,7 @@
     "mrr@10": 0.051
   },
   "notes": [
-    "groundedness is null: the run failed on the first Tamil question, OpenVINO INT4 CPU MatMul cannot build a primitive descriptor at ~10.4k prompt tokens (BLOCKERS #11).",
+    "groundedness measured 2026-08-24 after BLOCKERS #11 was fixed (ae14943). The earlier run died on question 45 (first Tamil) at ~10.4k prompt tokens; context is now trimmed to generate.max_prompt_tokens=6000. 12 of 54 questions were trimmed. Retrieval metrics are unchanged by the fix, as expected - it touches generation only.",
     "recall@20 == recall@10 exactly: retrieving deeper than 10 adds nothing, so rerank may use top_n 10 for free.",
     "rank distribution of the correct chunk over 49 answerable: rank1=30, rank2-5=14, rank6-10=4, rank11-20=0, never=1.",
     "a perfect reranker over top-20 therefore caps at recall@5 = 0.980, i.e. +0.082 headroom on the gating metric."
