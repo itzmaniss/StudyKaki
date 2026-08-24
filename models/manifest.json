@@ -51,6 +51,16 @@
       "ov_version": "2026.3.0",
       "converted_at": "2026-08-23T16:50:19Z"
     },
+    "qwen3-4b-instruct": {
+      "role": "generator",
+      "hf_id": "Qwen/Qwen3-4B-Instruct-2507",
+      "hf_revision": "cdbee75f17c01a7cc42f958dc650907174af0554",
+      "precision": "int4",
+      "ir_dir": "ir/qwen3-4b-instruct-int4",
+      "ir_sha256": "8d9c8713d23ff16f2e5b1ae7f5f72eef3580f792159579e6df66a772c7e0c6ee",
+      "ov_version": "2026.3.0",
+      "converted_at": "2026-08-24T03:12:44Z"
+    },
     "ta_PP-OCRv5_mobile_rec": {
       "role": "ocr_rec_taml",
       "hf_id": "PaddlePaddle/ta_PP-OCRv5_mobile_rec",
