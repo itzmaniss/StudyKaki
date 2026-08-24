@@ -125,3 +125,38 @@ Qwen3-4B INT4 generator is unconverted, so `answer/generate.py` is tested agains
 pipeline and has never run a real token. Files over CLAUDE.md's 500-line limit:
 `tests/test_dense.py` 788, `eval/bench.py` 565, `tests/test_generate.py` 549,
 `answer/generate.py` 546, `models/convert.py` 533.
+
+## 2026-08-24 11:15 — pre-V2 sweep: deps, chunker, groundedness, golden set
+Done, in commit order:
+- `deps: pin torch<2.9` — the generator export had been failing on
+  `ImportError: _attention_scale`. torch 2.9 moved the TorchScript ONNX exporter to
+  `torch.onnx._internal.torchscript_exporter` and left `symbolic_opset14` as a star-import
+  shim, which cannot re-export underscore names. optimum-intel and nncf are pinned by
+  ARCHITECTURE §7.1, so torch was the only lever. 2.8.0 imports clean; suite still green.
+- `ingest: pick the OCR head per document` — `script_hint` was a pipeline-level setting, so a
+  single run over a mixed ta/en/zh corpus could only be right for one language. All three
+  Tamil PDFs route to OCR, so they would have gone to the Chinese+English default head and come
+  back as CJK noise at high confidence — BLOCKERS #5 all over again. The hint now follows the
+  corpus directory (`data/corpus/<lang>/`); `--script-hint` overrides.
+- `ingest: enforce min_tokens across section boundaries (chunk/2)` — `_merge_short` only folds
+  within a section, so a section that is one short group shipped at any size. std12_cs_vol2_en
+  produced twelve `"CHAPTER n"` chunks of 2 tokens each, 10% of that document's index and
+  twelve near-identical vectors that match any query containing the word chapter. **Stage
+  version bumped: chunk and embed caches rebuild.**
+- `eval: wire DenseRetriever into the harness` — `--retriever dense`, lazy import so the
+  random baseline still runs with no IR on disk.
+- `eval: wire the groundedness column` — fraction of the model's citation markers that survived
+  `cite.verify`. Previously unobservable: `answer.text` is already cleaned, so invented markers
+  are gone by the time a caller sees it. Off by default (`--groundedness`).
+- `eval: replace the placeholder golden set` — **44 real questions**, every answer read off the
+  page it cites. 8 cross-lingual, 5 unanswerable, 7 table/figure. No PLACEHOLDER remains.
+
+Verified: `uv run pytest -q` → 732 passed, 8 skipped. `ruff format`/`check` clean, `uv lock --check` clean.
+Corpus routing confirmed on real files: 3 Tamil PDFs -> OCR (`taml` head), 5 others -> text layer.
+Smoke test end-to-end: std12_cs_vol2_en 240pp -> 2673 blocks -> 126 chunks -> index, 2m17s on CPU.
+
+In flight (background, unattended): full-corpus ingest over all 8 PDFs / 2617 pages, and the
+Qwen3-4B INT4 conversion. No GPU on this machine — everything falls back to CPU and says so.
+
+Next: Tamil golden questions (blocked until OCR output is readable — BLOCKERS #3), then the
+baseline `eval/run.py --retriever dense` table, then chunk-size tuning against recall@5.
