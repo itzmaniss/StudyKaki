@@ -16,7 +16,7 @@
 # be scored against a single doc_id. See BLOCKERS.md "parallel documents".
 
 # --- std12_cs_vol1_en — StarOffice, monolingual English -------------------------------
-{"q": "In which year did the personal computer first appear?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [67], "note": ""}
+{"q": "In which year did the personal computer first appear?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [67], "alt_doc_ids": {"b579e7e0a18c6b652f296c458b4fcd3fb140a54ecf67d6cbff9330a3255c13f7": [67]}, "note": "twin page anchored on the digits 1975"}
 {"q": "How many rows can a StarOffice Calc spreadsheet have?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [68], "note": ""}
 {"q": "What does the & text operator do in StarOffice Calc?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [79], "note": ""}
 {"q": "What is the order of precedence for arithmetic operators in StarOffice Calc?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [80], "note": ""}
@@ -28,7 +28,7 @@
 {"q": "What are the default margins in StarOffice Writer?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [59], "note": ""}
 
 # --- std12_cs_vol2_en — C++, monolingual English --------------------------------------
-{"q": "How many bytes does an int occupy and what is its range?", "lang": "en", "doc_id": "bb47b2c6d11863ff6e437bff75fe5166cd428d76716b659bf5acfc8f313be526", "gold_pages": [46], "note": "table — data type sizes and ranges"}
+{"q": "How many bytes does an int occupy and what is its range?", "lang": "en", "doc_id": "bb47b2c6d11863ff6e437bff75fe5166cd428d76716b659bf5acfc8f313be526", "gold_pages": [46], "alt_doc_ids": {"04def206667e5f6c60281721bde128d3ed60fafc4086de591f37c44d8f8b5360": [51]}, "note": "table — data type sizes and ranges; twin page anchored on the digits 32768"}
 {"q": "What is the range of an unsigned char in C++?", "lang": "en", "doc_id": "bb47b2c6d11863ff6e437bff75fe5166cd428d76716b659bf5acfc8f313be526", "gold_pages": [46], "note": "table — data type sizes and ranges"}
 {"q": "What are the different types of basic statements in C++?", "lang": "en", "doc_id": "bb47b2c6d11863ff6e437bff75fe5166cd428d76716b659bf5acfc8f313be526", "gold_pages": [62], "note": ""}
 {"q": "What are the three uses of the asterisk in C++?", "lang": "en", "doc_id": "bb47b2c6d11863ff6e437bff75fe5166cd428d76716b659bf5acfc8f313be526", "gold_pages": [49], "note": ""}
@@ -68,3 +68,19 @@
 {"q": "What was the price of Bitcoin in March 2024?", "lang": "en", "doc_id": "26b49c00db808a746e2b8cd1362b480c39cccb245c35709e6772fc93f3d9560f", "gold_pages": [], "note": "unanswerable — outside corpus"}
 {"q": "请给出2025年我国网民规模的预测数字。", "lang": "zh", "doc_id": "26b49c00db808a746e2b8cd1362b480c39cccb245c35709e6772fc93f3d9560f", "gold_pages": [], "note": "unanswerable — report stops at 2021"}
 {"q": "How do I install Microsoft Excel on macOS?", "lang": "en", "doc_id": "0d9df1814851ad3e0b9658afbe138d9880b003be601e3682d0b0b560ccea45a7", "gold_pages": [], "note": "unanswerable — corpus covers StarOffice, not Excel"}
+
+# --- digital_electronics_ta — Tamil, OCR-only document (no text layer, no parallel twin) ---
+# Every page below was read from the OCR output actually in the index, not from the PDF text
+# layer, so these are labelled against what the retriever can really see (BLOCKERS #10).
+{"q": "பூலியன் இயற்கணிதத்தை உருவாக்கியவர் யார்?", "lang": "ta", "doc_id": "dfd864d7e859787efdd03c62b162dd05f30d0e92e5e417c065b8a653e0aa43db", "gold_pages": [62], "note": ""}
+{"q": "தர்க்க சுற்றுகளில் HIGH மற்றும் LOW நிலைகள் எந்த மின்னழுத்தங்களைக் குறிக்கின்றன?", "lang": "ta", "doc_id": "dfd864d7e859787efdd03c62b162dd05f30d0e92e5e417c065b8a653e0aa43db", "gold_pages": [63], "note": ""}
+{"q": "அடிப்படை தர்க்க வாயில்கள் எத்தனை வகைப்படும்? அவை யாவை?", "lang": "ta", "doc_id": "dfd864d7e859787efdd03c62b162dd05f30d0e92e5e417c065b8a653e0aa43db", "gold_pages": [67], "note": ""}
+{"q": "ஒரு தர்க்க வாயிலுக்கு எத்தனை வெளியீடுகள் இருக்கும்?", "lang": "ta", "doc_id": "dfd864d7e859787efdd03c62b162dd05f30d0e92e5e417c065b8a653e0aa43db", "gold_pages": [67], "note": ""}
+{"q": "கார்ணா வரைபடத்தில் சாய்வாக நகர்வது அனுமதிக்கப்படுகிறதா?", "lang": "ta", "doc_id": "dfd864d7e859787efdd03c62b162dd05f30d0e92e5e417c065b8a653e0aa43db", "gold_pages": [164], "note": ""}
+{"q": "SOP முறையில் கார்ணா வரைபடத்தில் எந்த மதிப்புகளைத் தொகுக்க வேண்டும்?", "lang": "ta", "doc_id": "dfd864d7e859787efdd03c62b162dd05f30d0e92e5e417c065b8a653e0aa43db", "gold_pages": [163], "note": ""}
+
+# --- cross-lingual: English question, Tamil-only document -----------------------------
+{"q": "Who formulated Boolean algebra?", "lang": "en", "doc_id": "dfd864d7e859787efdd03c62b162dd05f30d0e92e5e417c065b8a653e0aa43db", "gold_pages": [62], "note": "cross-lingual en->ta"}
+{"q": "What voltage levels represent logic HIGH and LOW in a digital circuit?", "lang": "en", "doc_id": "dfd864d7e859787efdd03c62b162dd05f30d0e92e5e417c065b8a653e0aa43db", "gold_pages": [63], "note": "cross-lingual en->ta"}
+{"q": "What are the three basic logic gates?", "lang": "en", "doc_id": "dfd864d7e859787efdd03c62b162dd05f30d0e92e5e417c065b8a653e0aa43db", "gold_pages": [67], "note": "cross-lingual en->ta"}
+{"q": "In a Karnaugh map, is diagonal movement allowed when grouping cells?", "lang": "en", "doc_id": "dfd864d7e859787efdd03c62b162dd05f30d0e92e5e417c065b8a653e0aa43db", "gold_pages": [164], "note": "cross-lingual en->ta"}

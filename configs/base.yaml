@@ -19,13 +19,18 @@ models:
   generator: { name: qwen3-4b-instruct,   device: CPU, precision: int4 }
 
 chunk:    { target_tokens: 400, overlap: 60, min_tokens: 80 }
-# tau calibrated 2026-08-24 against the full 8-doc index and the 44-question golden set
-# (BLOCKERS #8). Measured cosine top-1: answerable 0.547-0.783, unanswerable 0.443-0.692 —
-# the two overlap, so no threshold separates them cleanly. 0.50 is the best free operating
-# point: it declines 2 of the 5 unanswerable questions and costs 0 answerable ones. Raising
-# it to 0.60 catches 4 of 5 but loses 6 answerable, which is the wrong trade for a study aid.
-# Retrieval metrics are unaffected either way — recall is scored before the abstain decision.
-retrieve: { k: 20, n_context: 5, tau: 0.50 }
+# tau recalibrated 2026-08-24 against the full 8-doc index and the 54-question golden set
+# (BLOCKERS #8). Measured cosine top-1: answerable 0.460-0.783, unanswerable 0.443-0.692 —
+# the ranges overlap almost completely, so tau is a trade, never a correct value.
+#
+# The safe window is [0.45, 0.46] and nothing wider: 2 of 5 unanswerable declined, 0 answerable
+# lost. It was [0.45, 0.52] before the cross-lingual Tamil questions existed, and they collapsed
+# it, because an English query against Tamil OCR scores 0.460-0.542 where monolingual Chinese
+# scores 0.731-0.783. The hardest-won answers sit lowest, right on top of the noise.
+#
+# Retrieval metrics are unaffected — recall is scored before the abstain decision.
+retrieve: { k: 20, n_context: 5, tau: 0.45 }
+
 generate: { max_new_tokens: 512, temperature: 0.2 }
 
 paths:

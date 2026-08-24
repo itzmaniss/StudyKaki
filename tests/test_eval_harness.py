@@ -100,12 +100,12 @@ class TestGoldenFile:
         assert sum("table" in g.note or "figure" in g.note for g in golden) >= 5
         assert not any(g.note.startswith("PLACEHOLDER") for g in golden)
 
-    @pytest.mark.xfail(
-        reason="Tamil questions are blocked on the OCR pass — BLOCKERS.md #3", strict=False
-    )
     def test_golden_covers_all_three_corpus_languages(self):
-        """§5 wants the set spread across all three. Marked xfail rather than weakened, so it
-        turns green by itself the moment the Tamil questions land."""
+        """§5 wants the set spread across all three languages and 10 cross-lingual questions.
+
+        Was xfail while the Tamil half waited on the OCR pass; it turned green on its own when
+        those questions landed, which is what marking the gap rather than weakening the
+        assertion bought."""
         golden = load_golden()
         assert {g.lang for g in golden} >= {"en", "ta", "zh"}
         assert sum("cross-lingual" in g.note for g in golden) >= 10
