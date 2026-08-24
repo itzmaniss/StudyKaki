@@ -198,3 +198,55 @@ anything built on it must pass `--index` explicitly. Left in place rather than d
 
 Next: `eval/run.py --retriever dense --groundedness` on the pinned index, to replace the null
 groundedness column in `eval/baselines/v1.json`. That number is what §10 gates the V2 arms on.
+
+## 2026-08-25 00:50 — V2 §10 arms built on branch `v2`
+
+Branch, not main: V1 behaviour is untouched and every arm still defaults off.
+
+- `retrieve: BM25 lexical arm + hybrid RRF retriever` (`f563b8a`) — per-script tokenization is
+  the real work per §10. Whitespace for Latin/Tamil/Devanagari, character bigrams for CJK,
+  jieba used if installed but not a dependency. Okapi BM25 hand-rolled; `rank_bm25`/`bm25s`
+  are not worth a dep for 2595 chunks.
+  **The Tamil trap:** a `\w`-based token regex drops Unicode combining marks (category Mn), so
+  `ஜார்ஜ்` shatters into single letters and Tamil BM25 silently returns garbage. Caught by a
+  test, fixed by splitting on whitespace literally as §10 says.
+- `eval: two-phase §10 arm sweep` (`799327d`) — retrieval is ~30 ms/question, generation ~90 s,
+  so all 8 permutations score on recall/MRR in seconds and `--groundedness` is opt-in for
+  finalists only. A full 8-way generative sweep would have been ~11 hours.
+- `retrieve: conditional query rewrite arm` (`9ac5ebf`) — §10 trigger only.
+- `models: add bge-reranker-v2-m3 conversion` (`74cd945`) + `retrieve: cross-encoder rerank`
+  (`4585e79`, `ac7635f`).
+
+**Three bugs worth remembering, all silent:**
+1. Tuples have an `.index` *method*, so `hasattr(item, "index")` is always true and picked the
+   wrong branch for `(idx, score)` pairs.
+2. Post-hoc `nncf.compress_weights` on a saved IR reads and writes the same file. It died
+   mid-write leaving a model with **no tokenizer**, and a shell pipe reported exit 0. Quantize
+   at export instead.
+3. `TextRerankPipeline` loads clean on arm64 then throws on every call (BLOCKERS #13a). Our own
+   graceful degradation then hid it — the first sweep reported rerank as "no gain" when the arm
+   had never run once. **Degradation paths need to be loud enough to notice in a results table.**
+
+Verified: `uv run ruff format`/`check` clean, `uv lock --check` clean, `uv run pytest` →
+**786 passed, 8 skipped** at the sweep commit, plus rerank/rewrite/lexical suites since.
+
+Measured, dense-vs-hybrid on the pinned index (54 questions, retrieval only):
+
+```
+arm                       recall@5        Δ   MRR@10        Δ     ms/q
+dense (V1)                   0.898   -0.000    0.736   -0.000       39
+hybrid                       0.939   +0.041    0.774   +0.038       36
+rewrite                      0.898   -0.000    0.736   -0.000     1143
+hybrid+rewrite               0.939   +0.041    0.774   +0.038     1070
+```
+
+Hybrid is the clear win: **+0.041 recall@5 for ~1 ms** of BM25. Rewrite fired on 4 of 54
+questions and moved nothing, exactly as predicted — the golden set is all standalone questions,
+so this is a legitimate "no effect", not a failure. Its 1143 ms/q is mostly one-off generator
+load amortised over 54 questions, not per-query cost.
+
+Two blockers raised: **#12** (hybrid RRF scores break the abstain gate — it measures fine but
+cannot ship behind `answer/`) and **#13** (rerank costs 5-11 s/query, ~10x §10's estimate,
+because our chunks are 400 tokens; §10's iGPU mitigation does not exist on this box).
+
+Next: rerank quality numbers, then a decision on #12 and #13 before anything merges to main.
