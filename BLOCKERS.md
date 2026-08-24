@@ -944,10 +944,18 @@ edge. If Tamil answers look thin, 6000 is the first number to raise.
 
 ---
 
-## 12. Hybrid retrieval cannot answer — RRF scores are not similarities
+## 12. Hybrid retrieval cannot answer — RRF scores are not similarities — RESOLVED (149d6f6)
 
-`retrieve/fusion.py:HybridRetriever` measures fine and **cannot be put behind
-`answer/generate.py` as it stands.**
+**Resolved with option 1 below.** `retrieve/retriever.py:abstains_for` asks the retriever for
+an `abstain_top_score` and compares *that* against tau; `HybridRetriever` returns the dense
+cosine. A retriever that exposes nothing keeps V1 behaviour bit-identical, so nothing changed
+for dense. `answer/generate.py` and `eval/run.py` both go through it.
+
+Consequence, accepted deliberately: a chunk only the lexical arm found cannot rescue a query
+dense wanted to abstain on. That is the price of keeping tau's calibration, and it is the right
+trade for a study tool where a confident wrong answer is the worst outcome (§0.6).
+
+The original problem follows.
 
 RRF scores come from ranks, not cosine. Best possible for one list is `1/(60+1)` ≈ 0.016;
 with two arms the top hit lands near 0.03. `cfg.retrieve.tau` is 0.45. So
@@ -1028,8 +1036,13 @@ correct chunk at rank 11-20 exactly zero times. That gets it to ~5.6 s. Still 3x
 
 §10's own mitigation is "put it on iGPU" — **there is no iGPU here** (BLOCKERS #1).
 
-**Need a decision, once the quality number lands:**
-1. Ship rerank only if the recall gain justifies ~5.6 s added latency. For a study tool where
+**Decided: `top_n` is 10** (`ac7635f`, `configs/base.yaml`). Free on quality — the rank
+distribution puts the correct chunk at rank 11-20 exactly zero times — and halves the cost.
+Measured in the sweep at 3-9 s per query depending on chunk length, so the latency question
+below still stands even at 10.
+
+**Still needs a decision, once the quality number lands:**
+1. Ship rerank only if the recall gain justifies the added latency. For a study tool where
    TTFT is the pitch, that is likely a no.
 2. Re-chunk smaller (`target_tokens` 200) so pairs are ~300 tokens. Halves rerank cost but
    **invalidates the index and every cached stage**, and moves the dense baseline too — so it
