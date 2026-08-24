@@ -60,6 +60,14 @@ CONFIG_INDEPENDENT = "none"
 
 PDF_SUFFIX = ".pdf"
 
+#: Corpus layout convention — `data/corpus/<lang>/`, the layout `scripts/fetch_corpus.py`
+#: writes. A document's language is not recoverable from the PDF before OCR: detecting script
+#: needs text, and on a scanned page OCR is the thing that produces it. The directory is the
+#: only honest source, and one index spans all three languages, so the hint cannot be a
+#: per-run flag. Languages with no dedicated head map to None — PP-OCRv5's default recogniser
+#: is Chinese+English, which is already the correct head for `zh`.
+LANG_SCRIPT_HINTS: dict[str, str | None] = {"ta": "taml", "en": "latn", "zh": None}
+
 
 @dataclass(frozen=True)
 class DocumentIngest:
@@ -301,8 +309,14 @@ class Pipeline:
                 log.info("pipeline.duplicate_skipped", path=str(path), doc_id=doc_id[:16])
                 continue
             seen.add(doc_id)
-            ingests.append(self.ingest_document(data, path.name))
+            hint = self.script_hint or script_hint_for_path(path)
+            ingests.append(self.ingest_document(data, path.name, script_hint=hint))
         return ingests
+
+
+def script_hint_for_path(path: Path) -> str | None:
+    """Which recognition head a PDF's corpus directory implies. None means the default head."""
+    return LANG_SCRIPT_HINTS.get(path.parent.name.lower())
 
 
 def ingest_paths(paths: Sequence[str | Path], cfg: Config, **kw: Any) -> IngestResult:
@@ -350,6 +364,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dpi", type=int, default=DEFAULT_OCR_DPI)
     ap.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     ap.add_argument(
+        "--script-hint",
+        default=None,
+        help="force one recognition head for every document, overriding the per-file "
+        "inference from the corpus directory (e.g. taml)",
+    )
+    ap.add_argument(
         "--no-cache",
         action="store_true",
         help="ignore the stage cache and recompute everything (slow; for debugging drift)",
@@ -366,7 +386,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.no_cache:
         cache = StageCache(cache.root, enabled=False)
 
-    result = ingest_paths(targets, cfg, cache=cache, dpi=args.dpi, batch_size=args.batch_size)
+    result = ingest_paths(
+        targets,
+        cfg,
+        cache=cache,
+        dpi=args.dpi,
+        batch_size=args.batch_size,
+        script_hint=args.script_hint,
+    )
     print(
         f"{result.n_documents} document(s), {result.n_chunks} chunks "
         f"({result.n_ocr_documents} needed OCR)\n"

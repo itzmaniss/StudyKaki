@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from pathlib import Path
 
 import numpy as np
 import pymupdf
@@ -457,3 +458,22 @@ def test_an_index_built_by_the_real_embedder_verifies_against_it(cfg, cache, tmp
     assert len(hits) == min(3, index.n_vectors)
     assert all(-1.0 <= h.score <= 1.0 for h in hits)
     assert all(h.chunk.page_start >= 1 for h in hits)
+
+
+def test_lang_script_hints_name_only_real_heads():
+    """The mapping is useless if it names a head that `build_engine` never loads."""
+    from ingest.ocr import SCRIPT_HEAD_ROLES
+    from ingest.pipeline import LANG_SCRIPT_HINTS
+
+    named = {v for v in LANG_SCRIPT_HINTS.values() if v is not None}
+    assert named <= set(SCRIPT_HEAD_ROLES.values())
+
+
+def test_script_hint_follows_corpus_directory():
+    from ingest.pipeline import script_hint_for_path
+
+    assert script_hint_for_path(Path("data/corpus/ta/std12_cs_vol1_ta.pdf")) == "taml"
+    assert script_hint_for_path(Path("data/corpus/en/std12_cs_vol1_en.pdf")) == "latn"
+    # zh has no dedicated head; the default recogniser is already Chinese+English.
+    assert script_hint_for_path(Path("data/corpus/zh/cnnic_internet_report.pdf")) is None
+    assert script_hint_for_path(Path("somewhere/else/scan.pdf")) is None
