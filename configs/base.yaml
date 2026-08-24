@@ -17,6 +17,8 @@ models:
   ocr_rec_latn: { name: latin_PP-OCRv5_mobile_rec, device: GPU, precision: int8 }
   embedder:  { name: bge-m3,              device: GPU, precision: int8 }
   generator: { name: qwen3-4b-instruct,   device: CPU, precision: int4 }
+  # §10 V2. Present so the arm can be switched on; unused while retrieve.rerank.enabled is false.
+  reranker:  { name: bge-reranker-v2-m3,  device: GPU, precision: int8 }
 
 chunk:    { target_tokens: 400, overlap: 60, min_tokens: 80 }
 # tau recalibrated 2026-08-24 against the full 8-doc index and the 54-question golden set
@@ -29,7 +31,15 @@ chunk:    { target_tokens: 400, overlap: 60, min_tokens: 80 }
 # scores 0.731-0.783. The hardest-won answers sit lowest, right on top of the noise.
 #
 # Retrieval metrics are unaffected — recall is scored before the abstain decision.
-retrieve: { k: 20, n_context: 5, tau: 0.45 }
+retrieve:
+  k: 20
+  n_context: 5
+  tau: 0.45
+  # §10 V2 arms — all off, so this file is the V1 baseline the before/after numbers compare
+  # against. eval/sweep.py flips them; nothing here changes without a number to justify it.
+  rerank:  { enabled: false, top_n: 20 }
+  hybrid:  { enabled: false, rrf_k: 60, dense_weight: 1.0, lexical_weight: 1.0 }
+  rewrite: { enabled: false, trigger_max_tokens: 5 }
 
 generate: { max_new_tokens: 512, temperature: 0.2 }
 

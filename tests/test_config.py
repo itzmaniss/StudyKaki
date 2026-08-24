@@ -91,3 +91,47 @@ class TestMalformedConfig:
     def test_missing_file(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             load_config(tmp_path / "nope.yaml")
+
+
+class TestV2Arms:
+    """§10 arms must default off, so an unmodified base.yaml is the measured V1 baseline."""
+
+    def test_every_v2_arm_is_off_by_default(self):
+        cfg = load_config(DEFAULT_CONFIG)
+        assert cfg.retrieve.v2_arms == ()
+        assert not cfg.retrieve.rerank.enabled
+        assert not cfg.retrieve.hybrid.enabled
+        assert not cfg.retrieve.rewrite.enabled
+
+    def test_v2_arms_names_what_is_live(self, tmp_path):
+        cfg = load_config(DEFAULT_CONFIG)
+        on = cfg.model_copy(
+            update={
+                "retrieve": cfg.retrieve.model_copy(
+                    update={
+                        "rerank": cfg.retrieve.rerank.model_copy(update={"enabled": True}),
+                        "hybrid": cfg.retrieve.hybrid.model_copy(update={"enabled": True}),
+                    }
+                )
+            }
+        )
+        assert on.retrieve.v2_arms == ("rerank", "hybrid")
+
+    def test_enabling_rerank_without_a_reranker_model_is_refused(self, tmp_path):
+        def turn_on(d):
+            d["retrieve"]["rerank"] = {"enabled": True}
+            d["models"].pop("reranker", None)
+
+        with pytest.raises(ValueError, match="models.reranker is not configured"):
+            load_config(write_cfg(tmp_path, turn_on))
+
+    def test_turning_an_arm_on_changes_config_hash_but_not_chunk_hash(self, tmp_path):
+        """Flipping a retrieval arm must never invalidate the ingest cache."""
+
+        def turn_on(d):
+            d["retrieve"]["hybrid"] = {"enabled": True}
+
+        a = load_config(write_cfg(tmp_path))
+        b = load_config(write_cfg(tmp_path, turn_on))
+        assert b.config_hash != a.config_hash
+        assert b.chunk_config_hash == a.chunk_config_hash

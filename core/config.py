@@ -43,6 +43,9 @@ class ModelsConfig(_Strict):
     # confidence, which is worse than failing. Absent means "no dedicated head", not "broken".
     ocr_rec_taml: ModelSpec | None = None
     ocr_rec_latn: ModelSpec | None = None
+    #: §10 cross-encoder. Optional for the same reason as the OCR heads: absent means the
+    #: rerank arm cannot be enabled, not that the system is broken.
+    reranker: ModelSpec | None = None
 
 
 class ChunkConfig(_Strict):
@@ -51,10 +54,53 @@ class ChunkConfig(_Strict):
     min_tokens: int = Field(ge=0)
 
 
+class RerankConfig(_Strict):
+    """§10 cross-encoder rerank. `top_n` is §10's own TTFT mitigation: 20 cross-encoder passes
+    on CPU is 1-2s, and recall@20 == recall@10 == 0.980 on this corpus, so reranking only the
+    top 10 costs nothing measurable."""
+
+    enabled: bool = False
+    top_n: int = Field(default=20, gt=0)
+
+
+class HybridConfig(_Strict):
+    """§10 dense + BM25 through reciprocal rank fusion."""
+
+    enabled: bool = False
+    rrf_k: int = Field(default=60, gt=0)
+    dense_weight: float = Field(default=1.0, ge=0.0)
+    lexical_weight: float = Field(default=1.0, ge=0.0)
+
+
+class RewriteConfig(_Strict):
+    """§10 conditional query rewrite. Fires *only* on a short query or an unresolved pronoun —
+    a full generation round-trip before retrieval costs 2-4s on CPU, so it must stay rare."""
+
+    enabled: bool = False
+    trigger_max_tokens: int = Field(default=5, gt=0)
+
+
 class RetrieveConfig(_Strict):
     k: int = Field(gt=0)
     n_context: int = Field(gt=0)
     tau: float = Field(ge=0.0, le=1.0)
+    # Every V2 arm defaults off, so an unmodified configs/base.yaml is exactly the V1 baseline
+    # the before/after numbers are measured against (§10: no component ships on vibes).
+    rerank: RerankConfig = RerankConfig()
+    hybrid: HybridConfig = HybridConfig()
+    rewrite: RewriteConfig = RewriteConfig()
+
+    @property
+    def v2_arms(self) -> tuple[str, ...]:
+        """Which V2 arms are live, for run labels and trace provenance."""
+        on = []
+        if self.rerank.enabled:
+            on.append("rerank")
+        if self.hybrid.enabled:
+            on.append("hybrid")
+        if self.rewrite.enabled:
+            on.append("rewrite")
+        return tuple(on)
 
 
 class GenerateConfig(_Strict):
@@ -83,6 +129,11 @@ class Config(_Strict):
             raise ValueError(
                 f"overlap ({self.chunk.overlap}) must be < target_tokens "
                 f"({self.chunk.target_tokens}) or chunking cannot advance"
+            )
+        if self.retrieve.rerank.enabled and self.models.reranker is None:
+            raise ValueError(
+                "retrieve.rerank.enabled is true but models.reranker is not configured — "
+                "add it to configs/base.yaml and run `uv run python -m scripts.setup`"
             )
 
     @property
