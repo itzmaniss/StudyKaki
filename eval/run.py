@@ -191,24 +191,47 @@ def _write_run(df: pl.DataFrame, cfg: Config, label: str, out_dir: Path | None) 
     return path
 
 
+def build_retriever(
+    name: str, cfg: Config, golden: list[GoldQuestion], seed: int, index: Path | None
+) -> Retriever:
+    """`random` needs no index and no model; `dense` needs both.
+
+    Imported lazily so the random baseline keeps working on a machine with no IR on disk —
+    that baseline is what proves the harness itself is sound (§5), and it must never depend
+    on the thing it exists to measure.
+    """
+    if name == "random":
+        return RandomRetriever(_pool_from_golden(golden, seed), seed)
+
+    from retrieve.dense import DenseRetriever
+
+    return DenseRetriever.open(cfg, index)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Retrieval eval harness (ARCHITECTURE.md §5)")
     ap.add_argument("--config", default="configs/base.yaml")
-    ap.add_argument("--retriever", choices=["random"], default="random")
+    ap.add_argument("--retriever", choices=["random", "dense"], default="random")
     ap.add_argument("--golden", type=Path, default=GOLDEN)
     ap.add_argument("--out-dir", type=Path, default=None)
+    ap.add_argument("--index", type=Path, default=None, help="index dir; defaults to the config's")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
     golden = load_golden(args.golden)
 
-    retriever: Retriever = RandomRetriever(_pool_from_golden(golden, args.seed), args.seed)
+    retriever: Retriever = build_retriever(args.retriever, cfg, golden, args.seed, args.index)
 
     result, df = evaluate(retriever, golden, cfg, label=args.retriever)
     print(result.as_table())
     if args.retriever == "random":
         print("\n^ random baseline — these numbers are meaningless by design (§5).")
+    if any(q.note.startswith("PLACEHOLDER") for q in golden):
+        print(
+            "\n^ golden.jsonl still contains PLACEHOLDER questions — these numbers describe "
+            "made-up labels, not retrieval quality (BLOCKERS.md #3)."
+        )
 
     try:
         path = _write_run(df, cfg, args.retriever, args.out_dir)
