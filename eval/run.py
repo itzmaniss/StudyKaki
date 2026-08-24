@@ -15,12 +15,13 @@ import random
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 
 from core.config import Config, load_config
 from core.schema import Chunk, Retrieved
-from eval.metrics import GoldQuestion, mean, recall_at, reciprocal_rank
+from eval.metrics import GoldQuestion, groundedness, mean, recall_at, reciprocal_rank
 from retrieve.retriever import Retriever, abstains
 
 GOLDEN = Path(__file__).resolve().parent / "golden.jsonl"
@@ -101,7 +102,15 @@ def evaluate(
     golden: list[GoldQuestion],
     cfg: Config,
     label: str = "unknown",
+    generator: Any | None = None,
 ) -> tuple[EvalResult, pl.DataFrame]:
+    """Retrieval metrics always; groundedness only when a `generator` is supplied.
+
+    Generation is orders of magnitude slower than retrieval — a 4B model on CPU over sixty
+    questions is minutes, not seconds — so the groundedness column stays `n/a` unless the
+    caller has explicitly paid for it (`--groundedness`). Retrieval numbers are identical
+    either way: the generator never touches `hits`.
+    """
     k = cfg.retrieve.k
     tau = cfg.retrieve.tau
     rows = []
@@ -109,6 +118,7 @@ def evaluate(
     for gold in golden:
         hits = retriever.retrieve(gold.q, k)
         abstained = abstains(hits, tau)
+        grounded = _groundedness_of(gold.q, hits, cfg, generator)
         answerable = not gold.unanswerable
         rows.append(
             {
@@ -125,6 +135,7 @@ def evaluate(
                 "recall@5": recall_at(hits, gold, 5) if answerable else None,
                 "recall@10": recall_at(hits, gold, 10) if answerable else None,
                 "rr@10": reciprocal_rank(hits, gold, 10) if answerable else None,
+                "groundedness": grounded,
             }
         )
 
@@ -146,10 +157,30 @@ def evaluate(
         recall_at_10=mean([r["recall@10"] for r in ans]),
         mrr_at_10=mean([r["rr@10"] for r in ans]),
         abstain_precision=abstain_precision,
-        groundedness=None,  # requires answer/ — wired in Block 6-8h
+        groundedness=(
+            groundedness(scored)
+            if (scored := [r["groundedness"] for r in rows if r["groundedness"] is not None])
+            else None
+        ),
         retriever=label,
     )
     return result, df
+
+
+def _groundedness_of(
+    question: str, hits: list[Retrieved], cfg: Config, generator: Any | None
+) -> float | None:
+    """One generated answer, scored on whether its citations were real. None = not measured.
+
+    An abstention returns None rather than 0.0 — declining to answer makes no claim, so it
+    belongs out of the average entirely (see `eval.metrics.groundedness`).
+    """
+    if generator is None:
+        return None
+    from answer.generate import generate_answer
+
+    result = generate_answer(question, generator=generator, cfg=cfg, hits=hits)
+    return None if result.abstained else result.groundedness
 
 
 def _pool_from_golden(golden: list[GoldQuestion], seed: int = 0) -> list[Chunk]:
@@ -216,6 +247,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out-dir", type=Path, default=None)
     ap.add_argument("--index", type=Path, default=None, help="index dir; defaults to the config's")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--groundedness",
+        action="store_true",
+        help="also generate an answer per question and score its citations; needs the "
+        "converted generator and takes minutes, so the column is n/a without it",
+    )
     args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
@@ -223,7 +260,13 @@ def main(argv: list[str] | None = None) -> int:
 
     retriever: Retriever = build_retriever(args.retriever, cfg, golden, args.seed, args.index)
 
-    result, df = evaluate(retriever, golden, cfg, label=args.retriever)
+    generator = None
+    if args.groundedness:
+        from answer.generate import load_generator
+
+        generator = load_generator(cfg)
+
+    result, df = evaluate(retriever, golden, cfg, label=args.retriever, generator=generator)
     print(result.as_table())
     if args.retriever == "random":
         print("\n^ random baseline — these numbers are meaningless by design (§5).")

@@ -169,3 +169,60 @@ class TestHarness:
         table = result.as_table()
         for col in ("recall@1", "recall@5", "recall@10", "MRR@10", "abstain_precision"):
             assert col in table
+
+
+# --- groundedness (§5) ---------------------------------------------------------------
+
+
+class ScriptedGenerator:
+    """`StreamingGenerator` that answers every question with the same text."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.name = "scripted"
+        self.requested_device = "CPU"
+        self.device = "CPU"
+        self.last_usage = None
+
+    def stream(self, prompt: str, settings):
+        yield self.text
+
+
+def _golden_one():
+    return [GoldQuestion(q="what is a matrix?", lang="en", doc_id="d1", gold_pages=[42])]
+
+
+class AlwaysHits:
+    """Scores above any sane tau, so the generator is always reached."""
+
+    def retrieve(self, query: str, k: int):
+        return [Retrieved(chunk=chunk(page=42), score=0.99, rank=1)]
+
+
+def test_groundedness_is_not_measured_without_a_generator():
+    cfg = load_config()
+    result, df = evaluate(AlwaysHits(), _golden_one(), cfg, label="t")
+    assert result.groundedness is None
+    assert "n/a" in result.as_table()
+
+
+def test_an_invented_citation_lowers_groundedness():
+    """The whole point of the column: `cite.verify` drops `[7]`, and the score records it.
+
+    One real context block means `[1]` is grounded and `[7]` cannot be. Asserting on the
+    ratio, not on any model wording.
+    """
+    cfg = load_config()
+    both = evaluate(AlwaysHits(), _golden_one(), cfg, generator=ScriptedGenerator("a [1] b [7]"))[0]
+    clean = evaluate(AlwaysHits(), _golden_one(), cfg, generator=ScriptedGenerator("a [1]"))[0]
+    assert both.groundedness == pytest.approx(0.5)
+    assert clean.groundedness == pytest.approx(1.0)
+
+
+def test_an_uncited_answer_is_ungrounded():
+    """§4 wants a citation on every claim, so asserting without one scores zero."""
+    cfg = load_config()
+    result = evaluate(
+        AlwaysHits(), _golden_one(), cfg, generator=ScriptedGenerator("just trust me")
+    )[0]
+    assert result.groundedness == pytest.approx(0.0)

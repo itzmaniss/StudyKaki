@@ -34,7 +34,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import structlog
 
-from answer.cite import verify
+from answer.cite import find_markers, verify
 from answer.prompt import (
     ABSTAIN_MESSAGE,
     TIER3_DISCLAIMER,
@@ -297,6 +297,23 @@ class AnswerResult:
     hits: tuple[Retrieved, ...]
     context: tuple[Retrieved, ...]
     trace: QueryTrace
+    #: Citation markers the model wrote, and how many survived `cite.verify`. Counted here
+    #: because `answer.text` is already cleaned — by the time anyone else sees it the invented
+    #: markers are gone, and the difference between the two is the whole groundedness signal.
+    markers_emitted: int = 0
+    markers_grounded: int = 0
+
+    @property
+    def groundedness(self) -> float:
+        """Fraction of the model's citation markers that pointed at real retrieved context.
+
+        A non-abstaining answer that cited nothing scores 0.0: §4 requires every claim to
+        carry a citation, so an uncited assertion is the exact failure this number exists to
+        catch. Abstentions make no claim and should be excluded by the caller, not scored.
+        """
+        if not self.markers_emitted:
+            return 0.0
+        return self.markers_grounded / self.markers_emitted
 
     @property
     def tier_label(self) -> str:
@@ -386,12 +403,14 @@ class AnswerStream:
         context: list[Retrieved] = []
         answer: Answer | None = None
         tier = TIER_LOCAL_INDEX
+        emitted = grounded = 0
 
         if not abstains(hits, self._cfg.retrieve.tau):
             context = hits[: self._cfg.retrieve.n_context]
             prompt = build_prompt(self.question, context, doc_names=self._doc_names)
             raw = yield from self._generate(prompt, STAGE_GENERATE)
             text, citations = verify(raw, context)
+            emitted, grounded = len(find_markers(raw)), len(find_markers(text))
             text = text.strip()
             if text and not _is_abstain_text(text):
                 answer = Answer(
@@ -417,6 +436,8 @@ class AnswerStream:
 
         trace = rec.finish(answer, tier=tier, abstained=answer.abstained)
         self._result = AnswerResult(
+            markers_emitted=emitted,
+            markers_grounded=grounded,
             answer=answer,
             tier=tier,
             hits=tuple(hits),

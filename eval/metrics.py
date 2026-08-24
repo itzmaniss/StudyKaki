@@ -64,3 +64,14 @@ def reciprocal_rank(hits: list[Retrieved], gold: GoldQuestion, k: int = 10) -> f
 
 def mean(xs: list[float]) -> float:
     return sum(xs) / len(xs) if xs else 0.0
+
+
+def groundedness(scores: list[float]) -> float:
+    """Mean per-answer groundedness (§5).
+
+    Each score is `AnswerResult.groundedness` — the fraction of the citation markers the model
+    wrote that survived `answer/cite.py`'s check against the context it was actually given.
+    Abstentions are excluded by the caller: refusing to answer is not an ungrounded claim, and
+    scoring it as one would make abstaining look worse than inventing a citation.
+    """
+    return mean(scores)
