@@ -21,6 +21,7 @@ dependencies = [
   "paddle2onnx>=2.1.0",
   "paddlepaddle>=3.3.1",
   "setuptools>=84.0.0",
+  "torch<2.9",
 ]
 
 [dependency-groups]
