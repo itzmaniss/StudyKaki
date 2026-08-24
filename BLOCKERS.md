@@ -103,13 +103,26 @@ translations of the other four: `std12_cs_vol1_{ta,en}`, `std12_cs_vol2_{ta,en}`
 correct answers and one label, so a retriever that returns the translated twin scores 0 for
 being right in the wrong language.
 
-Worked around, not fixed: every cross-lingual question in `golden.jsonl` targets a document that
-exists in **one** language only — the CNNIC report (zh) and the Tamil-only `digital_electronics_ta`.
-Monolingual questions still carry the bias, so absolute recall is understated by an unknown amount.
+**RESOLVED** — `GoldQuestion` takes an optional `alt_doc_ids`. §5's shape is untouched: a row with
+only `doc_id` behaves exactly as before. Two forms:
 
-**Decide:** whether `GoldQuestion` should take `doc_ids: list[str]` (any-of matching) instead. That
-is a change to §5's data shape, so I have not made it. The bias is constant across retrievers, so
-V2 before/after comparisons remain valid either way — this only distorts absolute numbers.
+```json
+{"q": "...", "doc_id": "<primary>", "gold_pages": [42], "alt_doc_ids": ["<twin>"]}
+{"q": "...", "doc_id": "<primary>", "gold_pages": [42], "alt_doc_ids": {"<twin>": [45, 46]}}
+```
+
+The list form shares `gold_pages` with the twin. The object form gives the twin its own pages, and
+is **required where the editions drift**. Measured over the corpus by comparing the numeric tokens
+on each page (digits survive the Tamil mojibake, so this works without OCR):
+
+| pair | best offset | agreement | use |
+|---|---|---|---|
+| `itu_wtdc22_en` ↔ `itu_wtdc22_zh` | 0 | 0.950 | list form |
+| `std12_cs_vol2_en` ↔ `std12_cs_vol2_ta` | 0 | 0.780 | list form |
+| `std12_cs_vol1_en` ↔ `std12_cs_vol1_ta` | 0 | **0.358** | **object form** — 231pp vs 232pp, drifts to +3 by the back |
+
+An unanswerable question may not carry `alt_doc_ids` (empty `gold_pages` means abstain, so no
+document answers it); that and duplicate/malformed entries raise rather than parse loosely.
 
 ---
 
