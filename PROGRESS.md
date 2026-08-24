@@ -160,3 +160,41 @@ Qwen3-4B INT4 conversion. No GPU on this machine — everything falls back to CP
 
 Next: Tamil golden questions (blocked until OCR output is readable — BLOCKERS #3), then the
 baseline `eval/run.py --retriever dense` table, then chunk-size tuning against recall@5.
+
+## 2026-08-24 21:35 — BLOCKERS #11 actually fixed; V1 correctness before any V2 arm
+
+Context for the developer: `aaf77c7` and `acc20e3` (Tamil golden set, V1 baseline) landed
+without PROGRESS entries — `eval/baselines/v1.json` is the authoritative record of that
+baseline, since `data/` is gitignored and run parquets cannot serve as the "before" column.
+
+Done:
+- `models: register the reranker role left out of the §10 config surface` (`cabf0a8`) —
+  `564a12c` added `models.reranker` to `core/config.py` and a `reranker:` entry to
+  `configs/base.yaml` but not to `registry.ROLES`, so `spec_for("reranker", cfg)` would have
+  raised. Resolution is lazy, so nothing broke at load; the rerank arm simply could not be
+  wired. Optional like the per-script OCR heads.
+- `answer: trim context to a prompt-token budget (BLOCKERS #11)` (`ae14943`) — **the fix had
+  been declared but never implemented.** `generate.max_prompt_tokens` existed in config and
+  `base.yaml`; nothing read it. Every Tamil question still died on OpenVINO's INT4 CPU MatMul.
+  `retrieve.n_context` is now a request, not a guarantee: `fit_context` drops blocks from the
+  tail until the prompt fits, highest-scoring context surviving, logging
+  `generate.context_trimmed`. A lone oversized block is attempted rather than abstained.
+
+The part worth remembering: the budget needs a *real* token count. `ingest.chunk.count_tokens`
+counts whitespace words and undercounts Tamil subwords ~7x — using it would have reproduced the
+crash while looking correct, the same blindness that let `recall@5 = 0.898` coexist with zero
+answerable Tamil questions. So generation uses the pipeline's own tokenizer, falling back to
+`estimate_tokens`, a script-weighted character rate with a 15% safety margin. Against #11's
+three measured prompts it over-counts by ~15% and never under.
+
+Verified: `uv run ruff format`/`check` clean, `uv lock --check` clean,
+`uv run pytest` → **764 passed, 8 skipped** (was 749; +15 covering the budget, the trim order,
+the citation contract under trimming, and the estimate's floor).
+
+Also found, not yet acted on: `data/index/` holds two indexes — the full corpus (2595 vectors,
+the one `v1.json` pins) and a 126-vector smoke-test leftover from one document. Same
+`chunk_config_hash`. `default_index_dir` refuses to choose between them, so `eval/run.py` and
+anything built on it must pass `--index` explicitly. Left in place rather than deleted.
+
+Next: `eval/run.py --retriever dense --groundedness` on the pinned index, to replace the null
+groundedness column in `eval/baselines/v1.json`. That number is what §10 gates the V2 arms on.

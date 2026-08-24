@@ -917,6 +917,27 @@ Worth noting what the model does when the prompt *does* fit: at 1 chunk it answe
 `ஜார்ஜ் பூல் [1]` — correct, and correctly cited. So the capability is there; only the budget is
 missing.
 
-**Fix:** `generate.max_prompt_tokens` (default 6000) added to config; the generation path must
-trim context to that budget and log when it does. Trimming beats failing — an answer from three
-chunks is worth more than an exception from five.
+**Fix — RESOLVED 2026-08-24 in `ae14943`.** `generate.max_prompt_tokens` (default 6000) had been
+added to `core/config.py` and `configs/base.yaml` on 2026-08-24, but nothing read it: the key
+existed and the fix did not, so every Tamil question still failed. Now wired end to end.
+
+`retrieve.n_context` is a request, not a guarantee. `answer/prompt.py:fit_context` drops blocks
+from the tail until the prompt fits the budget, so the highest-scoring context survives, and
+`answer/generate.py` logs `generate.context_trimmed` when it does. A lone oversized block is
+attempted rather than abstained.
+
+Sizing needs a *real* token count, and that is the part worth remembering:
+`ingest.chunk.count_tokens` counts whitespace words, which undercounts Tamil subwords roughly
+sevenfold. Using it as the budget would have reproduced the crash while looking correct — it is
+the same blindness that let `recall@5 = 0.898` coexist with zero answerable Tamil questions. So
+the budget uses `OpenVinoGenerator.count_tokens` (the pipeline's own tokenizer, exact) and falls
+back to `answer.prompt.estimate_tokens`, a script-weighted character rate calibrated on the table
+above with a 15% safety margin. Checked against all three measured prompts it over-counts by
+~15% and never under; undercounting is the only failure mode that matters here.
+
+Chunk text is never truncated to fit. That would hold the block count up at the cost of §4
+provenance — a citation pointing at a page whose text the model was never shown.
+
+**For the developer:** the budget of 6000 is set below the observed 6.5k–10.4k failure window,
+not measured against it. The bisection only bracketed the ceiling; nobody has found the exact
+edge. If Tamil answers look thin, 6000 is the first number to raise.
