@@ -45,6 +45,9 @@ from ingest.normalize import detect_script
 
 log = structlog.get_logger(__name__)
 
+#: Optional config roles that supply a dedicated recognition head, and the script each reads.
+SCRIPT_HEAD_ROLES: dict[str, str] = {"ocr_rec_taml": "taml", "ocr_rec_latn": "latn"}
+
 STAGE_VERSION = "ocr/1"
 
 #: The recogniser key used when no dedicated per-script head is registered. PP-OCRv5 mobile
@@ -265,7 +268,9 @@ class OcrEngine:
         parts += [f"{k}={self.recognizers[k].fingerprint}" for k in sorted(self.recognizers)]
         return hash_bytes("\x1f".join(parts).encode())
 
-    def read_page(self, image: PageImage, doc_id: str) -> list[Block]:
+    def read_page(
+        self, image: PageImage, doc_id: str, script_hint: str | None = None
+    ) -> list[Block]:
         """One page -> page-local blocks. `reading_order` is renumbered by `ocr_pages`."""
         if image.page < 1:
             raise OcrError(f"page is 1-indexed, got {image.page}")
@@ -276,7 +281,7 @@ class OcrEngine:
             return []
 
         crops = [_crop(pixels, b) for b in boxes]
-        texts, scripts = self._recognize(crops)
+        texts, scripts = self._recognize(crops, script_hint)
         median_height = float(np.median([b.height for b in boxes]))
 
         blocks: list[Block] = []
@@ -310,9 +315,18 @@ class OcrEngine:
             script = detect_script(text)
         return self.params.threshold_for(script)
 
-    def _recognize(self, crops: Sequence[np.ndarray]) -> tuple[list[RecResult], list[str]]:
-        results = list(self._primary.recognize(crops))
-        scripts = [self._primary.script] * len(results)
+    def _recognize(
+        self, crops: Sequence[np.ndarray], script_hint: str | None = None
+    ) -> tuple[list[RecResult], list[str]]:
+        # `script_hint` exists because text-based routing cannot bootstrap itself. The retry
+        # below picks a head by running `detect_script` on what the *default* head produced,
+        # which only works if that head can represent the script at all. PP-OCRv5's default
+        # charset contains no Tamil, so a Tamil line comes back as CJK noise, `detect_script`
+        # says `hans`, and the Tamil head is never consulted — the page reads as confident
+        # garbage. When the caller knows the document's script, it says so and that head leads.
+        primary = self.recognizers.get(script_hint or "", self._primary)
+        results = list(primary.recognize(crops))
+        scripts = [primary.script] * len(results)
         if len(self.recognizers) < 2:
             return results, scripts
 
@@ -366,6 +380,7 @@ def ocr_page(
     engine: OcrEngine,
     cache: StageCache | None = None,
     config_hash: str = "none",
+    script_hint: str | None = None,
 ) -> list[Block]:
     """One page through det + rec, cached on the page's own pixels.
 
@@ -378,7 +393,7 @@ def ocr_page(
         span.extra["page"] = image.page
 
         def compute() -> list[Block]:
-            return engine.read_page(image, doc_id)
+            return engine.read_page(image, doc_id, script_hint=script_hint)
 
         if cache is None:
             blocks = compute()
@@ -388,7 +403,10 @@ def ocr_page(
             stage="ocr",
             input_hash=input_hash,
             stage_version=STAGE_VERSION,
-            config_hash=f"{config_hash}:{params.digest()}",
+            # The hint selects which head reads the page, so two hints are two different
+            # results for identical pixels. Leaving it out of the key serves Chinese-charset
+            # noise from a cache entry made before the Tamil head existed.
+            config_hash=f"{config_hash}:{params.digest()}:{script_hint or '-'}",
         )
         return cache.get_or_compute(key, Block, compute, span=span)
 
@@ -400,6 +418,7 @@ def ocr_pages(
     engine: OcrEngine,
     cache: StageCache | None = None,
     config_hash: str = "none",
+    script_hint: str | None = None,
 ) -> list[Block]:
     """Every page of one document, with `reading_order` renumbered document-wide.
 
@@ -412,7 +431,12 @@ def ocr_pages(
         for image in images:
             pages += 1
             for block in ocr_page(
-                image, doc_id=doc_id, engine=engine, cache=cache, config_hash=config_hash
+                image,
+                doc_id=doc_id,
+                engine=engine,
+                cache=cache,
+                config_hash=config_hash,
+                script_hint=script_hint,
             ):
                 blocks.append(replace(block, reading_order=len(blocks)))
         span.n_out = len(blocks)
@@ -460,6 +484,29 @@ def build_engine(
             script=DEFAULT_SCRIPT,
         )
     }
+    # Per-script heads (§3). Each is optional; an unconfigured one simply means that script
+    # has no dedicated reader, not that the engine is broken.
+    for role, script in SCRIPT_HEAD_ROLES.items():
+        if getattr(cfg.models, role, None) is None:
+            continue
+        head = load_model(role, cfg, manifest_path=manifest_path)
+        head_classes = _output_classes(head.compiled)
+        heads[script] = PaddleTextRecognizer(
+            compiled=head.compiled,
+            charset=load_charset(head.entry.ir_dir, head_classes),
+            params=params,
+            fingerprint=ir_sha256(head.entry),
+            script=script,
+        )
+        log.info(
+            "ocr.head_loaded",
+            script=script,
+            model=head.name,
+            device=head.device,
+            fell_back=head.fell_back,
+            n_classes=head_classes,
+        )
+
     heads.update(extra_heads or {})
     detector = PaddleTextDetector(
         compiled=det.compiled, params=params, fingerprint=ir_sha256(det.entry)

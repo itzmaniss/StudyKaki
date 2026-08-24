@@ -230,3 +230,62 @@ convert` group is a clean follow-up — I did not do it because §0.1 keeps `nnc
 Verified working: both models convert, load through `models/registry.py`, and fall back to
 CPU with the right shapes — det `[?,3,?,?] -> [?,1,32..,32..]`, rec `[?,3,48,?] -> [?,1..,18385]`.
 The 18385-class head is PP-OCRv5's multilingual charset, which is what Tamil needs.
+
+---
+
+## 7. Tamil OCR confidence is 0.90-0.95, not 0.4-0.6 — CLAUDE.md's calibration note was a wrong-head artefact
+
+CLAUDE.md records from a prior run: *"Tamil recognition returns confidence 0.4-0.6 on clean
+scans where output is visibly correct; Latin on the same page returns 0.9+"*, and asks for a
+per-script threshold decision or 20 labelled pages.
+
+**That question is now answered, and the premise was wrong.** With a dedicated Tamil head
+(`ta_PP-OCRv5_mobile_rec`) the same pages read at **0.90-0.95**. Measured on p61 of
+`std12_cs_vol1_ta.pdf`:
+
+```
+script_hint=None    35 blocks,  0 contain Tamil   e.g. conf=0.67 '@uπg @1 6migu (margin guide) u @lgl'
+script_hint='taml'  47 blocks, 38 contain Tamil   e.g. conf=0.93 'சுட்டி சரியானஇடத்தில்இருந்தால் அந்தச் சுட்டி'
+```
+
+The 0.4-0.6 band was the **Chinese+English head guessing at Tamil glyphs**, not Tamil being
+intrinsically hard to read. Cross-check: the recovered line is the same sentence the mojibake
+text layer encodes as `²ì¢® êó¤ò£ù Þìî¢î¤ô¢ Þ¼ï¢î£ô¢ Üï¢îê¢ ²ì¢®`, so the OCR is
+independently corroborated by the broken layer it replaced.
+
+**No per-script thresholds are needed.** `confidence_by_script` stays empty and
+`min_confidence=0.30` stands, now with evidence rather than as a hedge. Do not add per-script
+numbers to work around a problem that was a routing bug.
+
+### Routing needed a hint — text-based head selection cannot bootstrap
+
+`_recognize` chose a dedicated head by running `detect_script` on what the *default* head
+produced. That only works if the default head can represent the script at all. It cannot for
+Tamil, so `detect_script` saw CJK noise, said `hans`, and never reached the Tamil head — 0 of
+35 blocks Tamil, every one confidently wrong. `script_hint` now lets the caller name the
+script; it flows through `ocr_page`/`ocr_pages`/`Pipeline` and is part of the OCR cache key,
+since two hints are two different results for identical pixels.
+
+---
+
+## 8. `tau = 0.35` does not abstain on this corpus
+
+§6 sets `retrieve.tau: 0.35`. On 15 OCR'd Tamil pages (52 chunks):
+
+```
+Q: "What colour is the table background?"  top=0.767  -> correct Tamil chunk (cross-lingual, works)
+Q: "How do I file my tax return?"          top=0.475  -> DID NOT ABSTAIN
+```
+
+A tax question against a computer-science textbook must abstain, and 0.475 clears 0.35
+comfortably. On the earlier synthetic corpus the equivalent out-of-domain question scored
+0.269 and abstained correctly, so this is corpus-dependent, not a code fault: BGE-M3 cosine
+scores sit higher against a small, noisy, OCR'd corpus than against clean synthetic text.
+
+**Not fixing this by guessing a new number.** §0.5 says no feature ships without an eval
+number, and `tau` is exactly what the 5 unanswerable golden questions exist to calibrate
+(§5). Raising it blind would trade false answers for false abstentions with nothing to show
+which is worse.
+
+**Need:** the golden set. Once 40-60 questions exist against this corpus, `abstain_precision`
+picks `tau` directly. Until then the demo will answer questions it should decline.

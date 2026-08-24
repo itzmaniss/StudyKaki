@@ -38,7 +38,18 @@ CPU = "CPU"
 IR_XML_NAME = "openvino_model.xml"
 IR_BIN_NAME = "openvino_model.bin"
 
-ROLES = ("ocr_det", "ocr_rec", "embedder", "generator")
+ROLES = (
+    "ocr_det",
+    "ocr_rec",
+    "embedder",
+    "generator",
+    # Optional per-script recognition heads (§3). Unset in config means "no dedicated head".
+    "ocr_rec_taml",
+    "ocr_rec_latn",
+)
+
+#: Roles a config may legitimately leave unset.
+OPTIONAL_ROLES = frozenset({"ocr_rec_taml", "ocr_rec_latn"})
 
 #: §3.1 — the embedder block, in the order the architecture lists it.
 EMBEDDER_FINGERPRINT_KEYS = (
@@ -219,10 +230,16 @@ def load_manifest(path: str | Path | None = None) -> Manifest:
 def spec_for(name: str, cfg: Config) -> tuple[str, ModelSpec]:
     """Resolve `name` — either a config role (`embedder`) or a model name (`bge-m3`)."""
     if name in ROLES:
-        return name, getattr(cfg.models, name)
+        spec = getattr(cfg.models, name)
+        if spec is None:
+            raise ModelNotFound(
+                f"role {name!r} is not configured in configs/base.yaml — it is optional, so "
+                f"either add it or stop asking for it"
+            )
+        return name, spec
     for role in ROLES:
-        spec: ModelSpec = getattr(cfg.models, role)
-        if spec.name == name:
+        spec = getattr(cfg.models, role)
+        if spec is not None and spec.name == name:
             return role, spec
     raise ModelNotFound(
         f"{name!r} is neither a config role ({', '.join(ROLES)}) nor a model named in "

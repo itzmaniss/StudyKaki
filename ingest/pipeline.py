@@ -156,6 +156,7 @@ class Pipeline:
         dpi: int = DEFAULT_OCR_DPI,
         batch_size: int = DEFAULT_BATCH_SIZE,
         index_root: str | Path | None = None,
+        script_hint: str | None = None,
     ) -> None:
         if dpi <= 0:
             raise ValueError(f"dpi must be positive, got {dpi}")
@@ -168,6 +169,11 @@ class Pipeline:
         self.dpi = dpi
         self.batch_size = batch_size
         self.index_root = index_root
+        # Which recognition head leads on a scanned document. Text-based head routing cannot
+        # bootstrap itself when the default charset cannot represent the script at all — a
+        # Tamil page read by the Chinese+English head yields confident nonsense that
+        # `detect_script` labels `hans`, so the Tamil head is never reached. See ingest/ocr.py.
+        self.script_hint = script_hint
         self._embedder = (
             embedder if embedder is not None else _LazyEmbedder(cfg, manifest_path=manifest_path)
         )
@@ -190,7 +196,9 @@ class Pipeline:
             )
         return self._engine
 
-    def ingest_document(self, data: bytes, filename: str) -> DocumentIngest:
+    def ingest_document(
+        self, data: bytes, filename: str, script_hint: str | None = None
+    ) -> DocumentIngest:
         """One document, load -> vectors. Nothing is indexed here: an index is a corpus."""
         doc_id = doc_id_for(data)
         with stage_timer("pipeline.document", doc_id) as span:
@@ -209,6 +217,7 @@ class Pipeline:
                     engine=self.engine(),
                     cache=self.cache,
                     config_hash=CONFIG_INDEPENDENT,
+                    script_hint=script_hint or self.script_hint,
                 )
             n_blocks = len(blocks)
             span.extra["n_blocks"] = n_blocks

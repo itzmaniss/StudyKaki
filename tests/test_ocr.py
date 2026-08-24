@@ -414,3 +414,50 @@ def test_params_digest_is_stable_and_independent_of_mapping_order():
     b = OcrParams(confidence_by_script={"latn": 0.8, "taml": 0.3})
     assert a.digest() == b.digest()
     assert a.digest() != OcrParams().digest()
+
+
+class TestScriptHintRouting:
+    """A hint is required because text-based routing cannot bootstrap itself.
+
+    `_recognize` picks a dedicated head by running `detect_script` on what the *default* head
+    produced. That only works if the default head can represent the script at all. PP-OCRv5's
+    default charset holds no Tamil, so a real Tamil line came back as CJK noise, `detect_script`
+    said `hans`, and the Tamil head was never consulted — measured on a real page as 0 Tamil
+    blocks out of 35, every one confidently wrong.
+    """
+
+    LINES = [Line(40, 60, 300, 90, "noise", 0.90)]
+
+    def _engine(self):
+        image, detector, default = build_page(self.LINES)
+        taml = StubRecognizer({1: RecResult("\u0ba4\u0bae\u0bbf\u0bb4\u0bcd", 0.93)}, script="taml")
+        engine = OcrEngine(detector, {DEFAULT_SCRIPT: default, "taml": taml}, params=OcrParams())
+        return image, engine
+
+    def test_hint_selects_the_dedicated_head(self):
+        image, engine = self._engine()
+        assert engine.read_page(image, "doc")[0].text == "noise"
+        assert (
+            engine.read_page(image, "doc", script_hint="taml")[0].text
+            == "\u0ba4\u0bae\u0bbf\u0bb4\u0bcd"
+        )
+
+    def test_hinted_block_carries_the_hinted_script(self):
+        image, engine = self._engine()
+        assert engine.read_page(image, "doc", script_hint="taml")[0].script == "taml"
+
+    def test_unknown_hint_falls_back_to_the_default_head(self):
+        """A hint for a script with no head must not crash — it just gets the default."""
+        image, engine = self._engine()
+        assert engine.read_page(image, "doc", script_hint="deva")[0].text == "noise"
+
+    def test_hint_is_part_of_the_cache_key(self, tmp_path):
+        """Two hints are two results for identical pixels; one key would serve the wrong one."""
+        image, engine = self._engine()
+        cache = StageCache(tmp_path / "cache")
+        plain = ocr_pages([image], doc_id="doc", engine=engine, cache=cache)
+        hinted = ocr_pages([image], doc_id="doc", engine=engine, cache=cache, script_hint="taml")
+        assert plain[0].text == "noise"
+        assert hinted[0].text == "\u0ba4\u0bae\u0bbf\u0bb4\u0bcd", (
+            "cache served the un-hinted result for a hinted read"
+        )

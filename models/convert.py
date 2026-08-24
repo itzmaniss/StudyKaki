@@ -126,6 +126,23 @@ SOURCES: dict[str, ModelSource] = {
         hf_id="PaddlePaddle/PP-OCRv5_mobile_rec",
         hf_revision="682f20538d8c086cb2128e5cfac775e6c4904e85",
     ),
+    # §3: "shared detector, per-script recognition head". PP-OCRv5's default recogniser is
+    # Chinese+English and its 18385-class charset contains no Tamil at all, so a Tamil page
+    # decodes to CJK noise at high confidence. These are the dedicated heads.
+    "ta_PP-OCRv5_mobile_rec": ModelSource(
+        name="ta_PP-OCRv5_mobile_rec",
+        role="ocr_rec_taml",
+        kind="paddle",
+        hf_id="PaddlePaddle/ta_PP-OCRv5_mobile_rec",
+        hf_revision="1bb164dad1d8eb23c7f7a382827e5305b37868d4",
+    ),
+    "latin_PP-OCRv5_mobile_rec": ModelSource(
+        name="latin_PP-OCRv5_mobile_rec",
+        role="ocr_rec_latn",
+        kind="paddle",
+        hf_id="PaddlePaddle/latin_PP-OCRv5_mobile_rec",
+        hf_revision="ab2cd5cc5fa6309be2e5acdfe66eca2c2c127d57",
+    ),
 }
 
 
@@ -552,7 +569,9 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
-    targets = list(args.only or []) or (list(ROLES) if args.all else [])
+    targets = list(args.only or []) or (
+        [r for r in ROLES if getattr(cfg.models, r, None) is not None] if args.all else []
+    )
     if not targets:
         ap.error("pass --only <role|name> (repeatable) or --all")
 

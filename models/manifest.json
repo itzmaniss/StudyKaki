@@ -40,6 +40,26 @@
         "query_prefix": "",
         "passage_prefix": ""
       }
+    },
+    "latin_PP-OCRv5_mobile_rec": {
+      "role": "ocr_rec_latn",
+      "hf_id": "PaddlePaddle/latin_PP-OCRv5_mobile_rec",
+      "hf_revision": "ab2cd5cc5fa6309be2e5acdfe66eca2c2c127d57",
+      "precision": "int8",
+      "ir_dir": "ir/latin_PP-OCRv5_mobile_rec-int8",
+      "ir_sha256": "b24810e4095bbfc5afe1d81d9997b3307fc1fc54b6fbbb9a0820b8c9d3003215",
+      "ov_version": "2026.3.0",
+      "converted_at": "2026-08-23T16:50:19Z"
+    },
+    "ta_PP-OCRv5_mobile_rec": {
+      "role": "ocr_rec_taml",
+      "hf_id": "PaddlePaddle/ta_PP-OCRv5_mobile_rec",
+      "hf_revision": "1bb164dad1d8eb23c7f7a382827e5305b37868d4",
+      "precision": "int8",
+      "ir_dir": "ir/ta_PP-OCRv5_mobile_rec-int8",
+      "ir_sha256": "39b81cd0de34d5793ed0cb2820169f42962ca0e8e932b10b381173268ca2be0d",
+      "ov_version": "2026.3.0",
+      "converted_at": "2026-08-23T16:50:12Z"
     }
   }
 }

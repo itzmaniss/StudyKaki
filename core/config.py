@@ -37,6 +37,12 @@ class ModelsConfig(_Strict):
     ocr_rec: ModelSpec
     embedder: ModelSpec
     generator: ModelSpec
+    # §3's "per-script recognition head". Optional: `ocr_rec` alone is a working engine, just
+    # one that reads whatever its own charset covers. PP-OCRv5's default recogniser is
+    # Chinese+English, so a Tamil page without `ocr_rec_taml` decodes to CJK noise — at high
+    # confidence, which is worse than failing. Absent means "no dedicated head", not "broken".
+    ocr_rec_taml: ModelSpec | None = None
+    ocr_rec_latn: ModelSpec | None = None
 
 
 class ChunkConfig(_Strict):

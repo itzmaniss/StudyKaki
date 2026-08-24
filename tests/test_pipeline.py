@@ -98,7 +98,7 @@ class FakeEngine:
     def fingerprint(self) -> str:
         return "fake-ocr-engine/1"
 
-    def read_page(self, image, doc_id: str) -> list[Block]:
+    def read_page(self, image, doc_id: str, script_hint: str | None = None) -> list[Block]:
         self.pages_read.append(image.page)
         return [
             Block(

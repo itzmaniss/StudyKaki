@@ -10,6 +10,11 @@ models:
   # Deviation from the contract, recorded in BLOCKERS.md #6.
   ocr_det:   { name: PP-OCRv5_mobile_det, device: GPU, precision: int8 }
   ocr_rec:   { name: PP-OCRv5_mobile_rec, device: GPU, precision: int8 }
+  # §3 asks for a shared detector with per-script recognition heads. PP-OCRv5's default
+  # recogniser is Chinese+English; its charset has no Tamil, so Tamil pages decode to CJK
+  # noise at high confidence. Beyond §6's four models — recorded in BLOCKERS.md #6.
+  ocr_rec_taml: { name: ta_PP-OCRv5_mobile_rec,    device: GPU, precision: int8 }
+  ocr_rec_latn: { name: latin_PP-OCRv5_mobile_rec, device: GPU, precision: int8 }
   embedder:  { name: bge-m3,              device: GPU, precision: int8 }
   generator: { name: qwen3-4b-instruct,   device: CPU, precision: int4 }
 
