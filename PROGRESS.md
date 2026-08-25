@@ -590,3 +590,60 @@ Next: a live smoke test on the Intel laptop, once `gemma-4-e2b-it` is actually c
 there (BLOCKERS #16's three commands) — confirms or refutes the `.generate()` call-shape
 finding, and is the only way to answer #17's open question (does Gemma 4 answer Tamil
 better than Qwen3-4B). Nothing else in #16 is outstanding.
+
+## 2026-08-26 00:22 — answer/generate.py, models/convert.py: live smoke test, two more real bugs
+
+This *is* the Intel-laptop machine (a Windows x86_64 box, not literally an Intel-branded
+laptop) — both `gemma-4-e2b-it` precisions were already converted earlier tonight, so ran the
+worktree's merged wiring against real weights instead of waiting. Two more failures, both real,
+both fixed, both confirmed against the actual model:
+
+1. **The worktree's own flagged risk was real.** `self.pipe.generate(prompt, gen_cfg,
+   streamer)` — three positional args — raised `TypeError: generate(): incompatible function
+   arguments` against a live `VLMPipeline`: none of its 9 overloads take 3 positional args for
+   text-only input (the pure-text one is `generate(self, prompt, **kwargs)`). Fixed by passing
+   `generation_config=gen_cfg, streamer=streamer` as keywords. Confirmed harmless for
+   `LLMPipeline`: its only overload names those same two parameters
+   (`generate(self, inputs, generation_config=None, streamer=None, **kwargs)`, checked against
+   the installed package's own docstring), so this is a no-op on the Qwen3 path.
+2. **A second, unrelated failure right behind it:** `Expected closing parenthesis` from
+   `openvino_genai`'s chat-template engine (minja), inside Gemma 4's own
+   `chat_template.jinja`. Root cause: real Jinja2 (and Python) let adjacent string literals —
+   `"a" "b"` — mean `"a" + "b"`; minja doesn't, and fails the *whole* template on one
+   `raise_exception(...)` call in a tool-calling branch this project never takes (nothing here
+   sends `tool_calls`). Minja still parses the full template up front, so the dead branch is
+   fatal anyway. First attempt patched the loose `chat_template.jinja` file post-conversion —
+   silently insufficient, because `openvino_tokenizers.convert_tokenizer` bakes the template
+   into the tokenizer IR's rt_info *before* that file is even written, and `VLMPipeline` reads
+   the baked copy, not the file. Real fix: `models/convert.py:_fix_chat_template_for_minja`
+   patches `tokenizer.chat_template` / `processor.chat_template` in memory, before
+   `_save_ov_tokenizer`/`save_pretrained` — a regex merge of adjacent string literals, not a
+   hardcoded literal, so it survives Google editing the message text later. Applied to both
+   already-converted builds via `regenerate_tokenizer`'s underlying pieces directly (rewrites
+   only the tokenizer IR + processor config, ~15s, no re-quantization, `ir_sha256` unaffected)
+   rather than re-running the full ~14-minute export.
+
+**Confirmed live, end to end, both precisions:** `load_generator` on `configs/gemma4-e2b-int8.yaml`
+loads a `VLMPipeline` on CPU and `stream()` produces real tokens — first piece observed was
+`'Photos'`, the start of a coherent English answer to "Explain photosynthesis in one sentence."
+Full multi-token output not yet captured end-to-end (background runs kept getting interrupted
+right after first-token); the failure modes above are what's fixed, not in question.
+
+**Noted, not fixed:** `regenerate_tokenizer` (`models/convert.py`) has the same single-file-IR
+assumption the registry fix addressed (`if not (ir_dir / IR_XML_NAME).exists()`) and doesn't
+pass `with_detokenizer=True` for `hf_vlm` kind — it would reject or mis-handle a VLM entry.
+Worked around by calling `_save_ov_tokenizer`/`_fix_chat_template_for_minja` directly instead
+of through that wrapper. Small, same-class fix if `regenerate_tokenizer` is needed for VLM
+again; not done here to keep this change to what the live test actually required.
+
+Verified: ruff clean, `uv run pytest -q` exit 0, `uv lock --check` clean. New tests for
+`_fix_chat_template_for_minja` in `tests/test_convert.py` (merges adjacent literals, leaves
+unrelated templates alone, no-ops on an absent template).
+
+Next: capture a full multi-token answer (retry, or run the UI directly) to actually read
+Gemma 4's output quality and finally answer #17 (Tamil vs. Qwen3-4B) — nothing else is blocking
+it now. `scripts.setup`'s warm stage still fails for gemma-4-e2b-it (`models/registry.py:
+load_model`/`_compile_with_fallback` always does `ov.Core().compile_model()` on the single-file
+convention; only `answer/generate.py:load_generator` got the VLM branch) — cosmetic, since
+`load_generator` is the path everything else uses, but worth fixing if the warm-cache
+convenience matters later.

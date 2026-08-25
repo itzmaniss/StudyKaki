@@ -1267,6 +1267,19 @@ code, apply the one-line change above and re-test; if it turns out some `VLMPipe
 accepts positional `generation_config`/`streamer` after all (pybind overload resolution can
 surprise), leave `stream` as is and delete this note.
 
+**Resolved 2026-08-26, live, on this machine (the Windows box turned out to be that Intel
+laptop for this purpose — both precisions were already converted).** The finding held exactly
+as predicted: `TypeError: generate(): incompatible function arguments`, none of `VLMPipeline`'s
+9 overloads matching 3 positional args. Applied the one-line fix verbatim (keyword
+`generation_config=`/`streamer=`); confirmed harmless for `LLMPipeline` from the installed
+package's own docstring before applying. Also hit and fixed a second, independent failure
+right behind it — `chat_template.jinja`'s `raise_exception(...)` uses adjacent-string-literal
+concatenation minja can't parse, baked into the tokenizer IR's rt_info at conversion time (see
+`PROGRESS.md` 2026-08-26 00:22 for the full root cause and fix). With both fixed, `stream()`
+produced real tokens against the live int8 model — first observed piece `'Photos'`, the start
+of a coherent English answer. Full multi-token capture and the actual #17 Tamil-vs-Qwen3
+comparison are still outstanding, blocked only on running it, not on any remaining defect.
+
 ---
 
 ## 17. Tamil answers nothing, and every reported metric hides it

@@ -222,7 +222,13 @@ class OpenVinoGenerator:
 
         def work() -> None:
             try:
-                outcome["result"] = self.pipe.generate(prompt, gen_cfg, streamer)
+                # Keyword, not positional (BLOCKERS #16): LLMPipeline's only overload names
+                # these two the same, so this is a no-op there — but VLMPipeline has 9
+                # overloads and none of them accept 3 positional args for text-only input;
+                # its pure-text overload is `generate(self, prompt, **kwargs)`.
+                outcome["result"] = self.pipe.generate(
+                    prompt, generation_config=gen_cfg, streamer=streamer
+                )
             except Exception as e:
                 outcome["error"] = e
             finally:

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -445,15 +446,56 @@ def convert_vlm(src: ModelSource, precision: str, out_root: Path) -> Path:
     from transformers import AutoProcessor, AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(snapshot)
+    _fix_chat_template_for_minja(tokenizer, model=src.name)
     tokenizer.save_pretrained(ir_dir)
     _save_ov_tokenizer(tokenizer, ir_dir, with_detokenizer=True)
     # VLMPipeline reads the processor config next to the IR; without it the pipeline cannot
     # build the prompt template and fails at load, not at generate.
     try:
-        AutoProcessor.from_pretrained(snapshot).save_pretrained(ir_dir)
+        processor = AutoProcessor.from_pretrained(snapshot)
+        _fix_chat_template_for_minja(processor, model=src.name)
+        processor.save_pretrained(ir_dir)
     except (OSError, ValueError) as e:
         log.warning("convert.processor_unavailable", model=src.name, error=str(e))
     return ir_dir
+
+
+_ADJACENT_STRING_LITERALS = re.compile(r'("(?:[^"\\]|\\.)*")(\s+)("(?:[^"\\]|\\.)*")')
+
+
+def _fix_chat_template_for_minja(carrier: Any, *, model: str) -> None:
+    """Collapse Jinja's implicit adjacent-string-literal concatenation on `carrier.chat_template`.
+
+    Real Jinja2 (and Python) let `"a" "b"` inside a call mean `"a" + "b"`; the minimal Jinja
+    engine `openvino_genai` uses to apply chat templates (minja) does not, and fails the
+    *whole* template with `Expected closing parenthesis` — even for a branch this project
+    never takes. Gemma 4's `chat_template.jinja` hits this in its tool-calling
+    `raise_exception(...)` message, which is dead code here (nothing sends `tool_calls`), but
+    minja parses the template up front, so a syntax error anywhere is fatal at generate time.
+
+    Must run on the in-memory `tokenizer.chat_template` / `processor.chat_template` *before*
+    `save_pretrained`/`_save_ov_tokenizer`: `openvino_tokenizers.convert_tokenizer` bakes the
+    template into the tokenizer IR's rt_info at conversion time, so patching the written
+    `chat_template.jinja` file afterward is silently too late — `VLMPipeline` reads the baked
+    copy, not the loose file.
+
+    Regex, not a hardcoded literal: robust to Google editing the message text later, and
+    logs when it actually changes something so a silent non-match is visible.
+    """
+    template = getattr(carrier, "chat_template", None)
+    if not template:
+        return
+    patched = template
+    while True:
+        merged = _ADJACENT_STRING_LITERALS.sub(
+            lambda m: f'"{m.group(1)[1:-1]}{m.group(3)[1:-1]}"', patched
+        )
+        if merged == patched:
+            break
+        patched = merged
+    if patched != template:
+        carrier.chat_template = patched
+        log.info("convert.chat_template_patched", model=model, carrier=type(carrier).__name__)
 
 
 def _is_pir(model_file: Path) -> bool:

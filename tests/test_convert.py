@@ -26,6 +26,7 @@ from models.convert import (
     DETOKENIZER_XML_NAME,
     TOKENIZER_XML_NAME,
     ConversionError,
+    _fix_chat_template_for_minja,
     _relative_to_manifest,
     _save_ov_tokenizer,
     regenerate_tokenizer,
@@ -248,6 +249,34 @@ def test_the_manifest_on_disk_is_the_schema_the_registry_expects():
     raw = json.loads(MANIFEST_PATH.read_text())
     assert raw["generated_by"] == "models/convert.py"
     assert raw["models"], "manifest lists no models"
+
+
+class _FakeCarrier:
+    def __init__(self, chat_template):
+        self.chat_template = chat_template
+
+
+def test_fix_chat_template_for_minja_merges_adjacent_string_literals():
+    """Regression for BLOCKERS #16 — minja rejects Jinja's `"a" "b"` implicit concatenation."""
+    carrier = _FakeCarrier(
+        '{{- raise_exception(\n    "part one "\n    "part two "\n    "part three."\n) -}}'
+    )
+    _fix_chat_template_for_minja(carrier, model="test")
+    assert '"part one "' not in carrier.chat_template
+    assert '"part one part two part three."' in carrier.chat_template
+
+
+def test_fix_chat_template_for_minja_leaves_unrelated_templates_alone():
+    original = '{{- "single literal, nothing to merge" -}}'
+    carrier = _FakeCarrier(original)
+    _fix_chat_template_for_minja(carrier, model="test")
+    assert carrier.chat_template == original
+
+
+def test_fix_chat_template_for_minja_is_a_no_op_with_no_template():
+    carrier = _FakeCarrier(None)
+    _fix_chat_template_for_minja(carrier, model="test")
+    assert carrier.chat_template is None
 
 
 def test_manifest_ir_dir_is_always_forward_slashed(tmp_path):
