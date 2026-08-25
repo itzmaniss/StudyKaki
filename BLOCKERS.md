@@ -1372,3 +1372,54 @@ tied to a real eval run, not a single smoke query, to revisit it.
 (then this is just a note, not a defect), or does it call for a numerically stable quantization
 path / a margin around `tau` / re-running the eval sweep on this machine before trusting any
 number from it? Blocked file: none — this is a finding, not a code change waiting on approval.
+
+---
+
+## 19. `models/manifest.json` cannot hold two precisions of the same model
+
+Found 2026-08-26, trying to run the int4 gemma-4-e2b-it build live (the last untested item
+from #16). The IR is on disk and healthy — `models/ir/gemma-4-e2b-it-int4/` carries the full
+multi-part export plus the minja-fixed tokenizer — but nothing can load it:
+
+```
+gemma-4-e2b-it     int8   ir/gemma-4-e2b-it-int8      <- manifest holds only this
+qwen3-4b-instruct  int4   ir/qwen3-4b-instruct-int4
+```
+
+`write_manifest` merges `{**existing, **entries}` keyed on the **model name**, and
+`convert()` returns one entry per name. Registering int8 (commit f341c7b) therefore
+overwrote the int4 entry registered just before it (107f23e). `configs/gemma4-e2b.yaml`
+asks for int4, so `load_generator` hits its own precision guard and refuses:
+
+    gemma-4-e2b-it: config asks for int4 but manifest holds int8
+
+This is not specific to Gemma. Any A/B between two quantizations of one checkpoint — which
+is exactly what §10 says every V2 component must ship with, and what `eval/sweep.py` exists
+to run — cannot be expressed in the manifest as it stands. The IR *directories* are already
+precision-suffixed (`_ir_dir` appends `-int4`/`-int8`); only the manifest key is not.
+
+**Workaround in place, no data lost:** re-running `uv run python -m models.convert --only
+generator --config configs/gemma4-e2b.yaml` now re-registers int4 in seconds rather than
+re-exporting for ~14 minutes (the skip check was the third single-file-IR bug, fixed in
+f241b40). The cost is that the two precisions take turns in the manifest, and whichever was
+registered last is the only one loadable.
+
+**Need a decision.** Options, cheapest first:
+
+1. **Leave it.** Precision is a config choice and the manifest records "what is converted
+   right now". Costs one ~10s re-registration per switch, and makes any two-precision sweep
+   a sequential, error-prone ritual.
+2. **Key on `<name>-<precision>`**, matching the IR directory convention that already
+   exists. Requires a `MANIFEST_SCHEMA_VERSION` bump (1 -> 2) and a lookup change in
+   `registry.Manifest.by_name`, which is currently name-only and is called from
+   `load_generator`, `load_model` and `verify_fingerprint`.
+3. **Nest precisions under the name** (`models[name][precision]`). Same schema bump, more
+   faithful to §3.1's "two INT8 quantizations of the same checkpoint are different models",
+   but a bigger change to every manifest reader.
+
+Recommend 2 — it is the smallest change that makes the manifest able to say what the disk
+already says. Not done unilaterally: `models/manifest.json` is named in §1 as the rubric
+evidence artefact for Intel tech usage, so its shape is architecture-adjacent.
+
+Blocked file: none. `models/convert.py:write_manifest`, `models/registry.py` are where the
+change would land.

@@ -647,3 +647,36 @@ load_model`/`_compile_with_fallback` always does `ov.Core().compile_model()` on 
 convention; only `answer/generate.py:load_generator` got the VLM branch) — cosmetic, since
 `load_generator` is the path everything else uses, but worth fixing if the warm-cache
 convenience matters later.
+
+## 2026-08-26 00:35 — models/registry.py, models/convert.py: the rest of the multi-part IR branch
+Done: `ModelEntry.compile_xml` (language tower for a VLM) so `scripts.setup`'s §7.2 warm stage
+works for gemma-4-e2b-it; `regenerate_tokenizer` now accepts the multi-part layout, patches the
+minja chat template before saving, writes a detokenizer for text-emitting kinds and rewrites the
+processor config.
+Verified: uv run pytest -q exit 0, ruff clean, uv lock --check clean. 4 new tests.
+Commit: e20f569
+
+## 2026-08-26 00:42 — eval/run.py: per-language breakdown, model vs retrieval abstentions
+Done: BLOCKERS #17 needs 1 and 2. New `model_abstained` and `answer_lang_match` columns, and a
+per-language table printed on every run (not only under `--groundedness` — recall pools the same
+way). A model refusal on context retrieval accepted is now counted instead of vanishing.
+Verified: uv run pytest -q exit 0; smoked over all 54 golden questions against the random
+baseline, en/ta/zh rows render.
+Commit: edac148
+
+## 2026-08-26 00:48 — ui/, answer/generate.py: name the abstention that actually happened
+Done: BLOCKERS #17 defect 2. `AnswerResult.model_abstained` reads the same signal eval/run.py
+counts, so the table and the screen cannot drift. CLI and web card stop claiming "nothing above
+the score threshold" when retrieval scored 0.608 and the model was the one that refused.
+Verified: uv run pytest -q exit 0, ruff clean, uv lock --check clean.
+Commit: fe60873
+
+## 2026-08-26 00:55 — models/convert.py: two more single-file-IR assumptions
+Done: `convert()`'s skip check never matched a `hf_vlm` layout, so every `scripts.setup` run
+re-exported and re-quantised the ~14-minute gemma-4 build and `--overwrite` was a no-op for that
+kind. `ir_sha256` hashed a file VLMs do not write, recording "" for the field §3.1 rule 4 calls
+the model's real identity — it now hashes the language tower, the pair registry.py verifies.
+Found while trying to register the already-built int4 IR; that attempt also surfaced BLOCKERS #19
+(the manifest is keyed on model name, so it cannot hold two precisions of one checkpoint).
+Verified: uv run pytest -q exit 0, ruff clean, uv lock --check clean. 2 new tests.
+Commit: f241b40
