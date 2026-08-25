@@ -1052,3 +1052,25 @@ below still stands even at 10.
 4. Drop rerank; take hybrid's +0.041 for ~1 ms and spend the time elsewhere.
 
 Measured on an M4 Pro. The Intel target is slower, so these are optimistic.
+
+### 13c. Rerank is 3x slower on Tamil — same root cause as #11
+
+From the groundedness run at `top_n: 10`, 45 rerank calls before it was killed:
+
+| queries | mean rerank |
+|---|---|
+| 1-40 (en / zh) | 6.6 s |
+| 41-45 (first Tamil) | **19.5 s** |
+| worst single call | **42.5 s** |
+
+Same cause as BLOCKERS #11: Tamil tokenizes at ~1.10 chars/token against English's 2.33, so an
+identical 400-token chunk becomes a far longer sequence for the cross-encoder. Cost per query is
+therefore a function of the *language of the retrieved chunks*, not of the query.
+
+This matters more than the mean suggests. A third of the corpus is Tamil, and §5 pitches TTFT.
+A student asking a Tamil question waits ~20 s before the first token, worst case 42 s — on top
+of generation. The English mean of 6.6 s hides that completely.
+
+If rerank ships, the honest options are a per-script `top_n` (rerank fewer candidates when the
+candidates are Tamil), or truncating the passage fed to the cross-encoder — which is safe here
+in a way it is not for generation, since the reranker only produces a score and never a citation.
