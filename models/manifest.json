@@ -55,11 +55,11 @@
       "role": "generator",
       "hf_id": "google/gemma-4-E2B-it",
       "hf_revision": "3e22461f65e89153144f8adb70e3b8c2cc9845a7",
-      "precision": "int4",
-      "ir_dir": "ir/gemma-4-e2b-it-int4",
+      "precision": "int8",
+      "ir_dir": "ir/gemma-4-e2b-it-int8",
       "ir_sha256": "",
       "ov_version": "2026.3.0",
-      "converted_at": "2026-08-25T13:43:50Z"
+      "converted_at": "2026-08-25T15:36:12Z"
     },
     "latin_PP-OCRv5_mobile_rec": {
       "role": "ocr_rec_latn",

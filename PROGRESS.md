@@ -508,3 +508,23 @@ Verified: ruff clean, `uv run pytest -q` exit 0, `uv lock --check` clean.
 Next: VLMPipeline wiring in `answer/generate.py:load_generator` + multi-part-aware
 `is_converted`/`ir_sha256` in `models/registry.py` — proceeding in an isolated worktree per the
 developer, concurrently with the INT8 conversion running in this tree.
+
+## 2026-08-25 23:50 — models/manifest.json: gemma-4-e2b-it INT8 also converts clean
+
+`--only generator` against `configs/gemma4-e2b-int8.yaml` completed the same way the INT4 run
+did: full multi-part IR in 847.8s, no `Reduce executor` failure, "warm" stage fails on the same
+known gap (`is_converted` assumes single-file IR — being fixed in the concurrent worktree per
+BLOCKERS #16). Manifest path separator held correct this time (`.as_posix()` fix from the
+previous entry).
+
+One consequence worth noting, not a bug: `models/manifest.json` keys entries by model name, not
+by name+precision, so this run's manifest write **replaced** the INT4 record rather than adding
+a second one — same behaviour every other model in this manifest already has (one active
+precision at a time). Both `models/ir/gemma-4-e2b-it-int4/` (4.3 GB) and `.../int8/` (5.0 GB)
+are still intact on disk; only the manifest's pointer moved. Whichever precision a config asks
+for that isn't the manifest's current one will fail fast with the existing "config asks for X
+but manifest holds Y" check in `models/registry.py`/`answer/generate.py` — re-running
+`scripts.setup` for that precision re-points the manifest, cheaply, since the IR itself is
+already on disk and conversion is what's slow.
+
+Verified: ruff clean, `uv run pytest -q` exit 0, `uv lock --check` clean.
