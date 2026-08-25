@@ -24,6 +24,7 @@ from core.config import Config, load_config
 from core.schema import Chunk, Retrieved
 from eval.bench import peak_rss_bytes
 from eval.metrics import GoldQuestion, groundedness, mean, recall_at, reciprocal_rank
+from ingest.normalize import detect_script
 from retrieve.retriever import Retriever, abstains_for
 
 log = structlog.get_logger("eval.run")
@@ -54,6 +55,69 @@ class RandomRetriever:
 
 
 @dataclass(frozen=True)
+class GenerationOutcome:
+    """What one generated answer tells us, beyond whether its citations were real.
+
+    `groundedness` is `None` for an abstention, which is why the other two fields exist:
+    a `None` on its own cannot distinguish "no generator was run" from "the model declined",
+    and BLOCKERS #17 is precisely a case where those two were conflated and six Tamil
+    failures became structurally invisible in the headline average.
+    """
+
+    groundedness: float | None
+    model_abstained: bool
+    #: `detect_script(answer) == detect_script(question)`. `None` when there is no answer to
+    #: score (abstention) or nothing with letters in it to detect.
+    answer_lang_match: bool | None
+
+
+@dataclass(frozen=True)
+class LangBreakdown:
+    """One language's slice of the run (BLOCKERS #17).
+
+    The pooled means hide a language that fails completely — 41 healthy en/zh rows drowned
+    6 Tamil zeros and every headline number still looked fine. Nothing about that is
+    specific to Tamil; it is what pooling does to any minority slice.
+    """
+
+    lang: str
+    n: int
+    recall_at_5: float
+    mrr_at_10: float
+    retrieval_abstained: int
+    model_abstained: int
+    n_scored: int
+    groundedness: float | None
+    answer_lang_match: float | None
+
+    def as_row(self) -> list[str]:
+        return [
+            self.lang,
+            str(self.n),
+            f"{self.recall_at_5:.3f}",
+            f"{self.mrr_at_10:.3f}",
+            str(self.retrieval_abstained),
+            str(self.model_abstained),
+            str(self.n_scored),
+            "n/a" if self.groundedness is None else f"{self.groundedness:.3f}",
+            "n/a" if self.answer_lang_match is None else f"{self.answer_lang_match:.3f}",
+        ]
+
+
+LANG_COLS = (
+    "lang",
+    "n",
+    "recall@5",
+    "MRR@10",
+    "abstain_ret",
+    "abstain_model",
+    "scored",
+    "groundedness",
+    "lang_match",
+)
+
+
+@dataclass(frozen=True)
 class EvalResult:
     n_questions: int
     recall_at_1: float
@@ -63,6 +127,20 @@ class EvalResult:
     abstain_precision: float | None
     groundedness: float | None
     retriever: str
+    per_lang: tuple[LangBreakdown, ...] = ()
+
+    def as_lang_table(self) -> str:
+        """The pooled table above, split by language (BLOCKERS #17)."""
+        rows = [b.as_row() for b in self.per_lang]
+        widths = [
+            max(len(c), *(len(r[i]) for r in rows)) if rows else len(c)
+            for i, c in enumerate(LANG_COLS)
+        ]
+        head = "  ".join(c.ljust(w) for c, w in zip(LANG_COLS, widths, strict=True))
+        body = "\n".join(
+            "  ".join(v.ljust(w) for v, w in zip(r, widths, strict=True)) for r in rows
+        )
+        return f"{head}\n{'-' * len(head)}\n{body}"
 
     def as_table(self) -> str:
         cols = ["recall@1", "recall@5", "recall@10", "MRR@10", "abstain_precision", "groundedness"]
@@ -132,7 +210,7 @@ def evaluate(
             )
         hits = retriever.retrieve(gold.q, k)
         abstained = abstains_for(hits, tau, retriever)
-        grounded = _groundedness_of(gold.q, hits, cfg, generator)
+        outcome = _generation_outcome(gold.q, hits, cfg, generator, retrieval_abstained=abstained)
         answerable = not gold.unanswerable
         rows.append(
             {
@@ -141,7 +219,13 @@ def evaluate(
                 "doc_id": gold.doc_id,
                 "gold_pages": gold.gold_pages,
                 "answerable": answerable,
+                # `abstained` is the *retrieval* gate only — it is what tau controls, and it
+                # is what abstain_precision is scored against. A model that refuses on
+                # context retrieval accepted is `model_abstained`, a different failure with
+                # a different fix (BLOCKERS #17).
                 "abstained": abstained,
+                "model_abstained": outcome.model_abstained if generator is not None else None,
+                "answer_lang_match": outcome.answer_lang_match,
                 "top_score": hits[0].score if hits else 0.0,
                 # Retrieval quality is scored on what was retrieved, independent of the
                 # abstain decision — otherwise tau tuning silently moves recall.
@@ -149,7 +233,7 @@ def evaluate(
                 "recall@5": recall_at(hits, gold, 5) if answerable else None,
                 "recall@10": recall_at(hits, gold, 10) if answerable else None,
                 "rr@10": reciprocal_rank(hits, gold, 10) if answerable else None,
-                "groundedness": grounded,
+                "groundedness": outcome.groundedness,
             }
         )
 
@@ -180,24 +264,82 @@ def evaluate(
             else None
         ),
         retriever=label,
+        per_lang=_per_lang(rows),
     )
     return result, df
 
 
-def _groundedness_of(
-    question: str, hits: list[Retrieved], cfg: Config, generator: Any | None
-) -> float | None:
-    """One generated answer, scored on whether its citations were real. None = not measured.
+def _per_lang(rows: list[dict[str, Any]]) -> tuple[LangBreakdown, ...]:
+    out: list[LangBreakdown] = []
+    for lang in sorted({r["lang"] for r in rows}):
+        group = [r for r in rows if r["lang"] == lang]
+        ans = [r for r in group if r["answerable"]]
+        scored = [r["groundedness"] for r in group if r["groundedness"] is not None]
+        matches = [r["answer_lang_match"] for r in group if r["answer_lang_match"] is not None]
+        out.append(
+            LangBreakdown(
+                lang=lang,
+                n=len(group),
+                recall_at_5=mean([r["recall@5"] for r in ans]),
+                mrr_at_10=mean([r["rr@10"] for r in ans]),
+                retrieval_abstained=sum(1 for r in group if r["abstained"]),
+                model_abstained=sum(1 for r in group if r["model_abstained"]),
+                n_scored=len(scored),
+                groundedness=groundedness(scored) if scored else None,
+                answer_lang_match=mean([1.0 if m else 0.0 for m in matches]) if matches else None,
+            )
+        )
+    return tuple(out)
 
-    An abstention returns None rather than 0.0 — declining to answer makes no claim, so it
-    belongs out of the average entirely (see `eval.metrics.groundedness`).
+
+def _generation_outcome(
+    question: str,
+    hits: list[Retrieved],
+    cfg: Config,
+    generator: Any | None,
+    *,
+    retrieval_abstained: bool,
+) -> GenerationOutcome:
+    """One generated answer, scored on its citations and on the language it came back in.
+
+    `groundedness` is None for an abstention rather than 0.0 — declining to answer makes no
+    claim, so it belongs out of the average entirely (see `eval.metrics.groundedness`). What
+    BLOCKERS #17 showed is that dropping it there and recording nothing else makes the
+    refusal itself unobservable, so the abstention is now *counted* on its way out.
     """
     if generator is None:
-        return None
+        return GenerationOutcome(groundedness=None, model_abstained=False, answer_lang_match=None)
     from answer.generate import generate_answer
 
     result = generate_answer(question, generator=generator, cfg=cfg, hits=hits)
-    return None if result.abstained else result.groundedness
+    if result.abstained:
+        # Retrieval-gated abstentions never reached the model, so they are not the model's
+        # refusal. `retrieval_abstained` is the caller's own gate decision, reused rather
+        # than recomputed: `abstain_score` reads the retriever's arm, and recomputing it
+        # without that retriever would silently score a reranked run against dense scores.
+        return GenerationOutcome(
+            groundedness=None,
+            model_abstained=not retrieval_abstained,
+            answer_lang_match=None,
+        )
+    return GenerationOutcome(
+        groundedness=result.groundedness,
+        model_abstained=False,
+        answer_lang_match=_lang_matches(question, result.answer.text),
+    )
+
+
+def _lang_matches(question: str, answer: str) -> bool | None:
+    """§4's "answer in the language of the question", as a number.
+
+    `ingest/normalize.py`'s detector is coarse — script, not language (§11 puts real language
+    ID out of scope) — which is exactly enough here: Tamil answered in English is a script
+    change, and that is the failure mode #17 found.
+    """
+    q_script, a_script = detect_script(question), detect_script(answer)
+    if "unknown" in (q_script, a_script):
+        return None
+    return q_script == a_script
 
 
 def _pool_from_golden(golden: list[GoldQuestion], seed: int = 0) -> list[Chunk]:
@@ -285,6 +427,10 @@ def main(argv: list[str] | None = None) -> int:
 
     result, df = evaluate(retriever, golden, cfg, label=args.retriever, generator=generator)
     print(result.as_table())
+    # Always, not only under --groundedness: the pooled row is what hid six dead Tamil
+    # questions behind a healthy-looking 0.844 (BLOCKERS #17), and that is not a property of
+    # the generation column — recall pools the same way.
+    print(f"\nby language:\n{result.as_lang_table()}")
     if args.retriever == "random":
         print("\n^ random baseline — these numbers are meaningless by design (§5).")
     if any(q.note.startswith("PLACEHOLDER") for q in golden):

@@ -6,6 +6,7 @@ from itertools import pairwise
 
 import pytest
 
+from answer.prompt import ABSTAIN_MESSAGE
 from core.config import load_config
 from core.schema import Chunk, Retrieved
 from eval.metrics import (
@@ -243,6 +244,93 @@ def test_an_uncited_answer_is_ungrounded():
         AlwaysHits(), _golden_one(), cfg, generator=ScriptedGenerator("just trust me")
     )[0]
     assert result.groundedness == pytest.approx(0.0)
+
+
+# --- per-language breakdown and model abstentions (BLOCKERS #17) ----------------------
+
+
+class BelowTauOnce:
+    """Scores under any sane tau, so retrieval gates before the model is ever reached."""
+
+    def retrieve(self, query: str, k: int):
+        return [Retrieved(chunk=chunk(page=42), score=0.01, rank=1)]
+
+
+def _golden_three_langs():
+    return [
+        GoldQuestion(q="what is a matrix?", lang="en", doc_id="d1", gold_pages=[42]),
+        GoldQuestion(q="矩阵是什么？", lang="zh", doc_id="d1", gold_pages=[42]),
+        GoldQuestion(q="அணி என்றால் என்ன?", lang="ta", doc_id="d1", gold_pages=[42]),
+    ]
+
+
+def test_a_model_refusal_is_counted_separately_from_a_retrieval_gate():
+    """#17's blind spot: both were `abstained`, so six dead Tamil rows scored a clean recall.
+
+    The model here refuses on context retrieval *accepted* — the exact case that produced no
+    groundedness row and no abstain row and therefore left no trace in any headline number.
+    """
+    cfg = load_config()
+    refuses = ScriptedGenerator(ABSTAIN_MESSAGE)
+    _, df = evaluate(AlwaysHits(), _golden_one(), cfg, generator=refuses)
+    assert df["abstained"].to_list() == [False], "retrieval accepted; only the model declined"
+    assert df["model_abstained"].to_list() == [True]
+    assert df["groundedness"].to_list() == [None], "a refusal makes no claim to score"
+
+
+def test_a_retrieval_gate_is_not_blamed_on_the_model():
+    cfg = load_config()
+    _, df = evaluate(BelowTauOnce(), _golden_one(), cfg, generator=ScriptedGenerator("a [1]"))
+    assert df["abstained"].to_list() == [True]
+    assert df["model_abstained"].to_list() == [False], "the model was never reached"
+
+
+def test_model_abstained_is_none_when_no_generator_ran():
+    """§0.5 — an unmeasured column is None, never a default that reads as a measurement."""
+    cfg = load_config()
+    _, df = evaluate(AlwaysHits(), _golden_one(), cfg)
+    assert df["model_abstained"].to_list() == [None]
+
+
+def test_an_answer_in_the_wrong_script_is_recorded_as_such():
+    """§4 orders an answer in the question's language; this turns that into a number."""
+    cfg = load_config()
+    golden = [GoldQuestion(q="அணி என்றால் என்ன?", lang="ta", doc_id="d1", gold_pages=[42])]
+    english = evaluate(AlwaysHits(), golden, cfg, generator=ScriptedGenerator("a matrix [1]"))[1]
+    tamil = evaluate(AlwaysHits(), golden, cfg, generator=ScriptedGenerator("அணி ஒன்று [1]"))[1]
+    assert english["answer_lang_match"].to_list() == [False]
+    assert tamil["answer_lang_match"].to_list() == [True]
+
+
+def test_each_language_gets_its_own_row():
+    cfg = load_config()
+    result, _ = evaluate(
+        AlwaysHits(), _golden_three_langs(), cfg, generator=ScriptedGenerator("x [1]")
+    )
+    assert [b.lang for b in result.per_lang] == ["en", "ta", "zh"]
+    assert all(b.n == 1 for b in result.per_lang)
+    assert "lang_match" in result.as_lang_table()
+
+
+def test_one_dead_language_survives_the_pooled_mean():
+    """The #17 shape in miniature: two healthy languages, one that answers nothing.
+
+    Pooled groundedness stays high because the refusals are excluded from it — which is
+    correct, and is exactly why the per-language `scored` count has to be visible.
+    """
+    cfg = load_config()
+
+    class RefusesTamil(ScriptedGenerator):
+        def stream(self, prompt, settings):
+            yield ABSTAIN_MESSAGE if "அணி" in prompt else "x [1]"
+
+    result, _ = evaluate(AlwaysHits(), _golden_three_langs(), cfg, generator=RefusesTamil("unused"))
+    by_lang = {b.lang: b for b in result.per_lang}
+    assert result.groundedness == pytest.approx(1.0), "pooled mean looks perfect"
+    assert by_lang["ta"].n_scored == 0, "...on zero Tamil rows"
+    assert by_lang["ta"].model_abstained == 1
+    assert by_lang["ta"].groundedness is None
+    assert by_lang["en"].n_scored == 1
 
 
 # --- parallel translations (BLOCKERS #9) ---------------------------------------------
