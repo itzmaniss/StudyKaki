@@ -293,3 +293,52 @@ Sweep parquet: `data/eval/sweep_rerank.parquet`.
 
 Next: groundedness on `rerank+hybrid` is the remaining half of the §10 gate — retrieval is only
 one of the two metrics it cuts on. ~80 min. Nothing merges to main before that.
+
+## 2026-08-25 12:40 — V2 verdict: ship hybrid, cut rerank, cut rewrite
+
+§10's rule is "every V2 component ships with a before/after number; if it doesn't move recall@5
+or groundedness, it gets cut." Measured on 54 questions, index `73677e03`, 0 degraded calls:
+
+| arm | recall@5 | Δ | MRR@10 | Δ | cost/query | verdict |
+|---|---|---|---|---|---|---|
+| dense (V1) | 0.898 | — | 0.736 | — | 37 ms | baseline |
+| **hybrid** | **0.939** | **+0.041** | **0.774** | +0.038 | **~1 ms** | **SHIP** |
+| rerank | 0.918 | +0.020 | 0.891 | +0.155 | 6.6-19.5 s | cut |
+| rerank+hybrid | 0.980 | +0.082 | 0.917 | +0.181 | 6.6-19.5 s | cut |
+| rewrite | 0.898 | +0.000 | 0.736 | +0.000 | — | cut |
+
+**Ship hybrid.** +0.041 recall@5 for ~1 ms of BM25. No new model, no new failure mode, and it is
+the half of the ceiling that is free. Flip `retrieve.hybrid.enabled: true`.
+
+**Cut rewrite.** Measured no effect. It fired on 4 of 54 questions; every golden question is a
+standalone, so the §10 trigger almost never fires. Not a failure — the arm is for conversational
+follow-ups this corpus does not contain. Keep the code, leave it off.
+
+**Cut rerank — on cost, not quality.** It passes §10's quality gate outright: rerank+hybrid
+reaches recall@5 = 0.980, which is the *corpus ceiling* (one answerable question's gold chunk is
+never retrieved at any depth, so 48/49 is the maximum anything can score), and MRR@10 0.736 ->
+0.917 means the right chunk is nearly always rank 1.
+
+It fails on latency, in exactly the way §10 predicted and in a way §10's mitigations cannot fix:
+- §10 budgeted 1-2 s. Measured 6.6 s (en/zh), **19.5 s (Tamil)**, 42.5 s worst (BLOCKERS #13).
+- §10's fixes were "iGPU, or top-10 only". `top_n` is already 10 — free, per the rank
+  distribution — and there is no iGPU on this machine (BLOCKERS #1).
+- §5 pitches TTFT. Twenty seconds before the first token, on a third of the corpus, is not a
+  study tool.
+
+Cost scales with the *language of the retrieved chunks*, not the query — the same tokenizer
+density that caused BLOCKERS #11. Tamil is where the multilingual claim lives and where this is
+worst.
+
+**Groundedness for rerank+hybrid was not obtained, and I stopped trying.** Three runs died at
+question 45; the cause is BLOCKERS #14 (memory), not the arm. More importantly BLOCKERS #15 shows
+the metric scores Tamil word-salad at 1.00, so the number would not have decided anything.
+
+Two blockers raised that outlive V2: **#14** — V1 needs 13.5 GB steady and 24 GB peak against a
+stated 8-16 GB target, so V1 does not fit its own target machine; **#15** — groundedness measures
+whether citations resolve, never whether answers are good.
+
+Branch `v2`, 15 commits, `main` untouched. Suite: 817 passed, 8 skipped.
+
+Recommended next action: `git merge v2` (all arms still default off), then flip
+`retrieve.hybrid.enabled: true` and re-run `eval/run.py --retriever dense` to confirm 0.939.
