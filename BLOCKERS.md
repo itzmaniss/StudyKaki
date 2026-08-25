@@ -1191,4 +1191,61 @@ model part instead.
 
 **Open question this was meant to answer, still open:** whether Gemma 4 E2B answers Tamil
 better than Qwen3-4B, which abstains on 2 of 2 Tamil questions and scores groundedness 0.000
-across all 6 (see PROGRESS 2026-08-25).
+across all 6 — the evidence is BLOCKERS #17.
+
+---
+
+## 17. Tamil answers nothing, and every reported metric hides it
+
+Found 2026-08-25, running the real generator on the pinned index and then re-reading the V1
+baseline run. This is the evidence BLOCKERS #16's experiment was trying to act on.
+
+**Live, `qwen3-4b-instruct-int4`, both Tamil golden questions:**
+
+```
+பூலியன் இயற்கணிதத்தை உருவாக்கியவர் யார்?   -> "I couldn't find this in your documents."  top 0.608
+ஒரு தர்க்க வாயிலுக்கு எத்தனை வெளியீடுகள்...  -> "I couldn't find this in your documents."  top 0.570
+```
+
+Both top scores are **above `tau = 0.45`**, so retrieval did not abstain — the model did, on
+context that answers the question. English and Chinese are fine on the same run (zh answered
+in zh; an English question answered in English off a *Tamil* source, so cross-lingual retrieval
+works).
+
+**The V1 baseline run agrees** (`data/eval/runs/20260824T150936Z_dense.parquet`, the run
+`eval/baselines/v1.json` pins — the parquet is gitignored, so the numbers are recorded here):
+
+| lang | questions | scored | mean groundedness |
+|---|---|---|---|
+| en | 37 | 31 | 0.935 |
+| zh | 11 | 10 | 0.900 |
+| ta | 6 | 4 | **0.000** |
+
+**Why no metric caught it.** `groundedness = 0.844` is the pooled mean, where 41 good en/zh
+rows drown 6 Tamil zeros. Worse, the two missing Tamil rows are *structurally* invisible:
+`eval/run.py:200` returns `None` for a model-side abstention (excluded from the average), while
+the `abstained` column at `run.py:134` records only the **retrieval** gate. A question where
+retrieval succeeded and generation refused therefore contributes a clean `recall@5 = 1.0` and
+nothing else. Tamil could fail on all six and every headline number would look healthy. Same
+blind spot as #15, one layer deeper.
+
+**Two smaller defects this exposed, both unfixed:**
+1. `ABSTAIN_MESSAGE` (`answer/prompt.py:23`) and `TIER3_DISCLAIMER` (`:27`) are hardcoded
+   English, so both §9 failure paths speak English regardless of the question's language —
+   even though rule 1 of both system prompts orders same-language answers.
+2. `ui/app.py:121` and `ui/web.py`'s card both label *any* abstention "nothing above the score
+   threshold". At top score 0.608 that is simply false. Retrieval abstention and generation
+   abstention need different words.
+
+**Need a decision on the order of work:**
+1. Per-language metric breakdown in `eval/run.py`, and count model-abstentions separately from
+   retrieval-abstentions. Cheapest, and nothing else is measurable until it exists.
+2. An `answer_lang_match` column — `detect_script(answer)` vs `detect_script(question)`, using
+   `ingest/normalize.py`'s existing detector. Turns "answers come back in the asking language"
+   into a number.
+3. Localise the two fixed strings. §9 mandates the disclaimer's *content*, not that it be
+   English — but it is architecture-adjacent wording, so it wants an explicit yes.
+4. The root cause: whether Tamil generation fails because of the 6000-token prompt budget
+   biting hardest on Tamil's ~1.1 chars/token (12 of 54 questions were trimmed), or because
+   Qwen3-4B INT4 is simply weak in Tamil. **#16's Gemma 4 experiment is the test for the
+   second half of that**, and it is blocked on x86 hardware, not on a decision.

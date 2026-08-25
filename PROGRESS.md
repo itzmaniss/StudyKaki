@@ -402,3 +402,20 @@ Verified: ruff clean, `uv lock --check` clean, `uv run pytest` -> 835 passed, 8 
 Next: continue on the Intel laptop — BLOCKERS #16 carries the three commands and the two
 wiring gaps (`VLMPipeline` in `load_generator`, multi-part IR in `registry.is_converted`).
 `main` is untouched; nothing here changes V1.
+
+## 2026-08-25 19:45 — Tamil is answering nothing, recorded as BLOCKERS #17
+
+Ran the real generator on the pinned index: both Tamil golden questions abstain with top scores
+*above* tau (0.608, 0.570), and the V1 baseline run scores Tamil groundedness **0.000** across
+all 6 questions against en 0.935 / zh 0.900. The pooled 0.844 hides it, and model-side
+abstentions are excluded from groundedness while the `abstained` column tracks only the
+retrieval gate — so no reported number moves when Tamil fails completely.
+
+Recorded rather than fixed: the parquet holding this is gitignored, so #17 carries the table.
+Cross-lingual retrieval itself is fine — an English question answered correctly off a Tamil
+source, and Chinese answered in Chinese.
+
+Verified: ruff clean, `uv lock --check` clean, `uv run pytest` -> 835 passed, 8 skipped.
+
+Next: #17 lists the four candidate fixes in order; the fourth is #16's Gemma 4 experiment,
+which needs the Intel laptop.
