@@ -12,8 +12,11 @@ architecture fixes verbatim, `ABSTAIN_MESSAGE` and `TIER3_DISCLAIMER`.
 
 from __future__ import annotations
 
+import json
 import time
+from pathlib import Path
 
+import openvino_genai
 import pytest
 
 from answer.cite import find_markers, has_citation_markers
@@ -28,12 +31,22 @@ from answer.generate import (
     StreamingGenerator,
     TokenUsage,
     generate_answer,
+    load_generator,
     stream_answer,
 )
 from answer.prompt import ABSTAIN_MESSAGE, TIER3_DISCLAIMER
-from core.config import DEFAULT_CONFIG, PathsConfig, load_config
+from core.config import DEFAULT_CONFIG, ModelSpec, PathsConfig, load_config
 from core.schema import Chunk, Retrieved
 from core.telemetry import TIER_LOCAL_INDEX, TIER_PARAMETRIC, TraceRecorder
+from models.registry import (
+    IR_BIN_NAME,
+    IR_XML_NAME,
+    MANIFEST_SCHEMA_VERSION,
+    VLM_LANGUAGE_MODEL_BIN_NAME,
+    VLM_LANGUAGE_MODEL_XML_NAME,
+    ModelNotFound,
+    ov_version,
+)
 
 # --- fixtures and fakes --------------------------------------------------------------
 
@@ -652,3 +665,162 @@ def test_settings_reject_nonsense():
         GenerationSettings(max_new_tokens=8, temperature=-1.0)
     with pytest.raises(ValueError, match="max_prompt_tokens"):
         GenerationSettings(max_new_tokens=8, temperature=0.2, max_prompt_tokens=0)
+
+
+# --- load_generator: LLMPipeline vs VLMPipeline (BLOCKERS #16) -----------------------
+#
+# `openvino_genai` is a hard pin (§0.1), so it is imported for real here; only the
+# `LLMPipeline`/`VLMPipeline` *classes* are faked, via `monkeypatch.setattr` on the real
+# module `answer.generate._genai()` returns. That is enough to prove `load_generator`
+# constructs the right class with the right call shape, without a converted IR on disk —
+# neither entry's stub files are valid OpenVINO models, since `load_generator` never asks
+# `ov.Core` to compile them (that is `models/registry.py:load_model`'s job, not this one's).
+
+
+def write_generator_manifest(
+    root: Path,
+    *,
+    name: str,
+    ir_dir: str,
+    vlm: bool,
+    precision: str = "int4",
+    build_ir: bool = True,
+) -> Path:
+    if build_ir:
+        ir_path = root / ir_dir
+        ir_path.mkdir(parents=True, exist_ok=True)
+        if vlm:
+            (ir_path / VLM_LANGUAGE_MODEL_XML_NAME).write_text("<xml/>")
+            (ir_path / VLM_LANGUAGE_MODEL_BIN_NAME).write_bytes(b"\x00")
+        else:
+            (ir_path / IR_XML_NAME).write_text("<xml/>")
+            (ir_path / IR_BIN_NAME).write_bytes(b"\x00")
+    entry = {
+        "role": "generator",
+        "hf_id": "stub/id",
+        "hf_revision": "0" * 40,
+        "precision": precision,
+        "ir_dir": ir_dir,
+        "ir_sha256": "",
+        "ov_version": ov_version(),
+        "converted_at": "2026-08-25T00:00:00Z",
+    }
+    path = root / "manifest.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": MANIFEST_SCHEMA_VERSION,
+                "generated_by": "tests",
+                "ov_version": ov_version(),
+                "models": {name: entry},
+            }
+        )
+    )
+    return path
+
+
+def _cfg_for_generator(cfg, name: str, *, device: str = "CPU", precision: str = "int4"):
+    return cfg.model_copy(
+        update={
+            "models": cfg.models.model_copy(
+                update={"generator": ModelSpec(name=name, device=device, precision=precision)}
+            )
+        }
+    )
+
+
+def make_pipeline_class(*, fail_on_devices: frozenset[str] = frozenset()):
+    """Stands in for `genai.LLMPipeline`/`genai.VLMPipeline`. `.calls` records exactly how
+    `load_generator` invoked the constructor, which is the whole point: `LLMPipeline` and
+    `VLMPipeline` are not call-compatible (BLOCKERS #16 — see `models_path`/`device`/`args`/
+    `kwargs` assertions below), so the call *shape* is what these tests check.
+    """
+    calls: list[dict] = []
+
+    class _Pipe:
+        def __init__(self, models_path, device, *args, **kwargs):
+            calls.append(
+                {"models_path": models_path, "device": device, "args": args, "kwargs": kwargs}
+            )
+            if device in fail_on_devices:
+                raise RuntimeError(f"no {device} plugin")
+
+        def get_tokenizer(self):
+            raise AttributeError("stub pipeline has no tokenizer")
+
+    _Pipe.calls = calls
+    return _Pipe
+
+
+def test_load_generator_builds_llm_pipeline_for_a_single_file_entry(cfg, tmp_path, monkeypatch):
+    manifest = write_generator_manifest(
+        tmp_path, name="qwen3-4b-instruct", ir_dir="ir/qwen-int4", vlm=False
+    )
+    fake_llm = make_pipeline_class()
+    monkeypatch.setattr(openvino_genai, "LLMPipeline", fake_llm)
+    generator_cfg = _cfg_for_generator(cfg, "qwen3-4b-instruct")
+
+    gen = load_generator(generator_cfg, manifest_path=manifest)
+
+    assert isinstance(gen, OpenVinoGenerator)
+    assert isinstance(gen.pipe, fake_llm)
+    assert len(fake_llm.calls) == 1
+    call = fake_llm.calls[0]
+    assert call["device"] == "CPU"
+    cache_dir = generator_cfg.resolve(generator_cfg.paths.ov_cache_dir)
+    # `LLMPipeline` takes device properties as a single positional `config` dict.
+    assert call["args"] == ({"CACHE_DIR": str(cache_dir)},)
+    assert call["kwargs"] == {}
+
+
+def test_load_generator_builds_vlm_pipeline_for_a_multi_part_entry(cfg, tmp_path, monkeypatch):
+    manifest = write_generator_manifest(
+        tmp_path, name="gemma-4-e2b-it", ir_dir="ir/gemma-int4", vlm=True
+    )
+    fake_vlm = make_pipeline_class()
+    fake_llm = make_pipeline_class()
+    monkeypatch.setattr(openvino_genai, "VLMPipeline", fake_vlm)
+    monkeypatch.setattr(openvino_genai, "LLMPipeline", fake_llm)
+    generator_cfg = _cfg_for_generator(cfg, "gemma-4-e2b-it")
+
+    gen = load_generator(generator_cfg, manifest_path=manifest)
+
+    assert isinstance(gen.pipe, fake_vlm)
+    assert not fake_llm.calls, "the LLMPipeline branch must not fire for a VLM entry"
+    call = fake_vlm.calls[0]
+    assert call["device"] == "CPU"
+    cache_dir = generator_cfg.resolve(generator_cfg.paths.ov_cache_dir)
+    # `VLMPipeline`'s text-only overload is (models_path, device, **kwargs) — a positional
+    # third argument does not match any of its overloads (BLOCKERS #16), so device
+    # properties must arrive as **kwargs instead of a positional dict.
+    assert call["args"] == ()
+    assert call["kwargs"] == {"CACHE_DIR": str(cache_dir)}
+
+
+def test_load_generator_falls_back_to_cpu_for_a_vlm_entry(cfg, tmp_path, monkeypatch):
+    """`select_device` passes `AUTO` through unchecked (it can't know what AUTO will pick),
+    so this is the one requested value that reaches `load_generator`'s own retry loop rather
+    than being narrowed to CPU before construction is ever attempted.
+    """
+    manifest = write_generator_manifest(
+        tmp_path, name="gemma-4-e2b-it", ir_dir="ir/gemma-int4", vlm=True
+    )
+    fake_vlm = make_pipeline_class(fail_on_devices=frozenset({"AUTO"}))
+    monkeypatch.setattr(openvino_genai, "VLMPipeline", fake_vlm)
+    generator_cfg = _cfg_for_generator(cfg, "gemma-4-e2b-it", device="AUTO")
+
+    gen = load_generator(generator_cfg, manifest_path=manifest)
+
+    assert gen.requested_device == "AUTO"
+    assert gen.device == "CPU"
+    assert [c["device"] for c in fake_vlm.calls] == ["AUTO", "CPU"]
+
+
+def test_load_generator_raises_when_the_vlm_ir_is_missing(cfg, tmp_path):
+    manifest = write_generator_manifest(
+        tmp_path, name="gemma-4-e2b-it", ir_dir="ir/gemma-int4", vlm=True, build_ir=False
+    )
+    generator_cfg = _cfg_for_generator(cfg, "gemma-4-e2b-it")
+
+    with pytest.raises(ModelNotFound, match="scripts.setup"):
+        load_generator(generator_cfg, manifest_path=manifest)

@@ -258,6 +258,14 @@ def load_generator(
     `models/registry.py` compiles an `ov.CompiledModel`; `LLMPipeline` wants the IR
     directory and a device string instead, so the manifest lookup and fallback are done
     here against the same manifest, not duplicated policy.
+
+    `entry.is_vlm` (BLOCKERS #16) picks `VLMPipeline` over `LLMPipeline` for a multi-part
+    IR (e.g. `gemma-4-e2b-it`, any-to-any so the language tower does not stand alone). The
+    two constructors are not call-compatible: `LLMPipeline` takes `config` as its third
+    *positional* argument, but `VLMPipeline`'s text-only overload is
+    `(models_path, device, **kwargs)` — a positional third argument does not match any of
+    its nine overloads and raises `TypeError` before the model ever loads. Device
+    properties are therefore passed as `**ov_config` for `VLMPipeline`.
     """
     from models.registry import ModelNotFound, load_manifest, ov_version, select_device, spec_for
 
@@ -296,7 +304,10 @@ def load_generator(
     last_error: Exception | None = None
     for device in dict.fromkeys((requested, CPU)):
         try:
-            pipe = genai.LLMPipeline(str(entry.ir_dir), device, ov_config)
+            if entry.is_vlm:
+                pipe = genai.VLMPipeline(str(entry.ir_dir), device, **ov_config)
+            else:
+                pipe = genai.LLMPipeline(str(entry.ir_dir), device, ov_config)
         except (RuntimeError, OSError) as e:
             last_error = e
             log.warning("generator.load_failed", model=entry.name, device=device, error=str(e))
@@ -308,6 +319,7 @@ def load_generator(
             requested_device=spec.device,
             device=device,
             fell_back=device != spec.device,
+            pipeline="VLMPipeline" if entry.is_vlm else "LLMPipeline",
         )
         return OpenVinoGenerator(pipe, name=entry.name, requested_device=spec.device, device=device)
 

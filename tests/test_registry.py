@@ -26,6 +26,8 @@ from models.registry import (
     IR_XML_NAME,
     MANIFEST_PATH,
     MANIFEST_SCHEMA_VERSION,
+    VLM_LANGUAGE_MODEL_BIN_NAME,
+    VLM_LANGUAGE_MODEL_XML_NAME,
     FingerprintMismatch,
     ModelNotFound,
     RegistryError,
@@ -62,6 +64,22 @@ def make_stub_ir(ir_dir: Path, fill: float = 0.5, dim: int = 1024) -> Path:
     return ir_dir
 
 
+def make_stub_vlm_ir(ir_dir: Path, fill: float = 0.5, dim: int = 8) -> Path:
+    """A multi-part IR stand-in (§7.3 `hf_vlm`) — only the language-model part, since that
+    is the only file `models/registry.py` reads. No `openvino_model.xml` is written, which
+    is exactly what distinguishes a converted VLM entry from a converted single-file one.
+    """
+    ir_dir.mkdir(parents=True, exist_ok=True)
+    ids = ops.parameter([-1, -1], ov.Type.i64, name="input_ids")
+    as_float = ops.convert(ids, ov.Type.f32)
+    pooled = ops.reduce_mean(as_float, ops.constant([1], ov.Type.i32), keep_dims=True)
+    weights = ops.constant(np.full((1, dim), fill, dtype=np.float32))
+    out = ops.matmul(pooled, weights, False, False)
+    model = ov.Model([out], [ids], "stub-language-model")
+    ov.save_model(model, ir_dir / VLM_LANGUAGE_MODEL_XML_NAME, compress_to_fp16=False)
+    return ir_dir
+
+
 def write_manifest(
     root: Path,
     *,
@@ -93,6 +111,44 @@ def write_manifest(
         json.dumps(
             {
                 "schema_version": schema_version,
+                "generated_by": "tests",
+                "ov_version": ov_version(),
+                "models": {name: entry},
+            }
+        )
+    )
+    return path
+
+
+def write_vlm_manifest(
+    root: Path,
+    *,
+    name: str = "gemma-4-e2b-it",
+    ir_dir: str = "ir/gemma-4-e2b-it-int4",
+    build_ir: bool = True,
+    fill: float = 0.5,
+) -> Path:
+    """A manifest entry for the §7.3 `hf_vlm` multi-part IR — no `embedding` block, same as
+    the generator role, and `ir_sha256: ""` because that is what `models/convert.py` records
+    today for a kind whose weights it cannot hash with the single-file convention (BLOCKERS #16).
+    """
+    if build_ir:
+        make_stub_vlm_ir(root / ir_dir, fill=fill)
+    entry = {
+        "role": "generator",
+        "hf_id": "google/gemma-4-E2B-it",
+        "hf_revision": "3e22461f65e89153144f8adb70e3b8c2cc9845a7",
+        "precision": "int4",
+        "ir_dir": ir_dir,
+        "ir_sha256": "",
+        "ov_version": ov_version(),
+        "converted_at": "2026-08-25T00:00:00Z",
+    }
+    path = root / "manifest.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": MANIFEST_SCHEMA_VERSION,
                 "generated_by": "tests",
                 "ov_version": ov_version(),
                 "models": {name: entry},
@@ -139,6 +195,50 @@ def test_manifest_tree_is_relocatable(manifest, tmp_path):
     entry = load_manifest(moved / "manifest.json").by_name("bge-m3")
     assert entry.ir_dir == (moved / "ir" / "stub-int8").resolve()
     assert entry.is_converted
+
+
+# --- multi-part IR (§7.3 `hf_vlm`, BLOCKERS #16) -----------------------------------
+
+
+def test_multi_part_ir_is_converted_and_flagged_vlm(tmp_path):
+    path = write_vlm_manifest(tmp_path)
+    entry = load_manifest(path).by_name("gemma-4-e2b-it")
+    assert entry.is_vlm
+    assert entry.is_converted
+
+
+def test_single_file_ir_is_not_flagged_vlm(manifest):
+    entry = load_manifest(manifest).by_name("bge-m3")
+    assert not entry.is_vlm
+    assert entry.is_converted
+
+
+def test_neither_layout_present_is_not_converted(tmp_path):
+    path = write_vlm_manifest(tmp_path, build_ir=False)
+    entry = load_manifest(path).by_name("gemma-4-e2b-it")
+    assert not entry.is_vlm
+    assert not entry.is_converted
+
+
+def test_vlm_language_model_xml_without_its_bin_is_not_converted(tmp_path):
+    """A partial write (xml landed, bin did not) must not read as converted."""
+    path = write_vlm_manifest(tmp_path, build_ir=False)
+    entry = load_manifest(path).by_name("gemma-4-e2b-it")
+    entry.ir_dir.mkdir(parents=True, exist_ok=True)
+    entry.vlm_language_model_xml.write_text("<not-a-real-ir/>")
+    assert not entry.vlm_language_model_bin.exists()
+    assert not entry.is_converted
+
+
+def test_registry_does_not_import_convert():
+    """VLM detection is file-presence, on purpose (§7.3) — registry.py stays independent of
+    convert.py's SOURCES/Kind table, which is offline conversion tooling, not a runtime dep.
+    """
+    import models.registry as registry
+
+    source = Path(registry.__file__).read_text()
+    assert "models.convert" not in source
+    assert "from models import convert" not in source
 
 
 def test_missing_manifest_names_the_setup_script(tmp_path):
@@ -307,6 +407,24 @@ def test_ir_sha256_raises_when_there_is_nothing_to_hash(tmp_path):
     path = write_manifest(tmp_path, embedding=EMBEDDING, build_ir=False)
     with pytest.raises(ModelNotFound, match="cannot fingerprint"):
         ir_sha256(load_manifest(path).by_name("bge-m3"))
+
+
+def test_ir_sha256_hashes_the_language_model_part_for_a_vlm_entry(tmp_path):
+    import hashlib
+
+    path = write_vlm_manifest(tmp_path)
+    entry = load_manifest(path).by_name("gemma-4-e2b-it")
+    weights = tmp_path / "ir" / "gemma-4-e2b-it-int4" / VLM_LANGUAGE_MODEL_BIN_NAME
+    assert weights.stat().st_size > 0
+    assert ir_sha256(entry) == hashlib.sha256(weights.read_bytes()).hexdigest()
+
+
+def test_ir_sha256_for_a_vlm_entry_falls_back_when_the_language_model_is_absent(tmp_path):
+    path = write_vlm_manifest(tmp_path, build_ir=False)
+    raw = json.loads(path.read_text())
+    raw["models"]["gemma-4-e2b-it"]["ir_sha256"] = "ab" * 32
+    path.write_text(json.dumps(raw))
+    assert ir_sha256(load_manifest(path).by_name("gemma-4-e2b-it")) == "ab" * 32
 
 
 # --- verify_fingerprint: the one that must raise ----------------------------------

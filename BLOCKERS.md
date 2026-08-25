@@ -1193,6 +1193,80 @@ model part instead.
 better than Qwen3-4B, which abstains on 2 of 2 Tamil questions and scores groundedness 0.000
 across all 6 — the evidence is BLOCKERS #17.
 
+### #16 wiring — RESOLVED (`models/registry.py` multi-part IR, `answer/generate.py:load_generator`), one call-shape finding left unresolved
+
+Both gaps this entry named are fixed:
+
+- `ModelEntry.is_converted` / `ir_sha256` now also recognise the multi-part IR
+  `convert_vlm` writes: `openvino_language_model.{xml,bin}` is treated as the authoritative
+  "is this converted / what identifies it" pair when `openvino_model.xml` is absent, via a
+  new `ModelEntry.is_vlm` property. Detected from file presence, not a manifest field or a
+  `models/convert.py` import — no `MANIFEST_SCHEMA_VERSION` bump.
+- `load_generator` branches on `entry.is_vlm` and builds `genai.VLMPipeline` instead of
+  `genai.LLMPipeline`. **The two constructors are not call-compatible, and this entry's own
+  "should carry over unchanged" note above was wrong about the constructor** (it turned out
+  right about `.generate`/`.get_tokenizer`, see below): `VLMPipeline`'s text-only overload is
+  `(models_path, device, **kwargs)`, with device properties as keyword arguments — passing
+  `ov_config` as a third *positional* argument (the working `LLMPipeline` call shape) raises
+  `TypeError: incompatible constructor arguments` immediately, confirmed empirically:
+
+  ```
+  >>> genai.VLMPipeline(path, "CPU", {"CACHE_DIR": "x"})
+  TypeError: incompatible constructor arguments. The following argument types are supported:
+      1. VLMPipeline(models_path, device: str, **kwargs)
+      2. VLMPipeline(models: Mapping[...], tokenizer, config_dir_path, device: str, ...)
+  >>> genai.VLMPipeline(path, "CPU", **{"CACHE_DIR": "x"})
+  RuntimeError: ... Could not open the file: ".../openvino_language_model.xml"   # progresses past __init__
+  ```
+
+  `load_generator` now passes `**ov_config` for the VLM branch and leaves the `LLMPipeline`
+  branch (positional `ov_config`) untouched.
+
+**Still open — `OpenVinoGenerator.stream` was deliberately left unmodified, per this entry's
+own instruction not to force a workaround on the strength of a guess.** It calls
+`self.pipe.generate(prompt, gen_cfg, streamer)` — three positional arguments. This works for
+`LLMPipeline` (single overload, `generate(inputs, generation_config=None, streamer=None,
+**kwargs)`). For `VLMPipeline` it is suspect: `VLMPipeline.generate` has **nine** pybind
+overloads, and every one that accepts `generation_config`/`streamer` positionally in the
+second/third slot also requires an `images`/`videos`/`image` argument first (type
+`Sequence[Tensor]` or `Tensor`, no default) — a `GenerationConfig` object does not satisfy
+any of them. The one pure-text overload is `generate(self, prompt: str, **kwargs)`, whose
+docstring lists `generation_config` and `streamer` as **keyword-only** entries in `kwargs`.
+Read literally, `pipe.generate(prompt, gen_cfg, streamer)` therefore does not match any
+`VLMPipeline` overload and would raise `TypeError` before generating anything — the same
+failure mode as the constructor above, in the same class.
+
+**Not fixed, and not verified either way, because there is no safe way to check it on this
+machine.** No real Gemma 4 weights exist here (BLOCKERS #16 above — NNCF cannot build them
+on arm64), so a live `VLMPipeline` cannot be constructed. Probing the *unconstructed* pybind
+type further than reading its `__doc__` is not safe: `VLMPipeline.__new__(VLMPipeline)`
+succeeds (produces a Python object), but calling `.generate(...)` on it — even inside a
+`try/except Exception` — **segfaults the interpreter** rather than raising a catchable
+`TypeError`, so this could not be exercised even indirectly. Forcing the change on this
+evidence alone risks trading a clean `TypeError` (loud, obvious) for a silent behavioural
+change nobody has watched run.
+
+**What I did instead:** left `OpenVinoGenerator.stream` byte-for-byte unchanged — the Qwen3
+path this entry protects is untouched — and recorded the finding here in full instead of
+guessing. **If the finding holds** (a live smoke test on the Intel laptop is the only way to
+know), the fix is narrow and provably safe for Qwen3: change the one call in
+`answer/generate.py:OpenVinoGenerator.stream` from
+`self.pipe.generate(prompt, gen_cfg, streamer)` to
+`self.pipe.generate(prompt, generation_config=gen_cfg, streamer=streamer)`. This is a no-op
+for `LLMPipeline` — its only overload names those exact two parameters
+`generation_config`/`streamer`, so keyword vs. positional makes no difference — and is what
+`VLMPipeline`'s text-only overload requires. `count_tokens`'s use of
+`self.pipe.get_tokenizer()` needs no equivalent change: `get_tokenizer` is confirmed present
+on `VLMPipeline` (`dir(genai.VLMPipeline)` lists it, matching `LLMPipeline`), which is the
+half of this entry's "carries over unchanged" claim that held up.
+
+**Need:** run the two golden Tamil questions (or any prompt) through
+`answer.generate.load_generator` + `OpenVinoGenerator.stream` against the real
+`gemma-4-e2b-it` IR once it exists (Intel laptop). If it raises `TypeError` on the current
+code, apply the one-line change above and re-test; if it turns out some `VLMPipeline` build
+accepts positional `generation_config`/`streamer` after all (pybind overload resolution can
+surprise), leave `stream` as is and delete this note.
+
 ---
 
 ## 17. Tamil answers nothing, and every reported metric hides it
