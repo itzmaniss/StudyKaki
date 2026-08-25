@@ -117,6 +117,8 @@ def tier_line(result: AnswerResult, style: Style) -> str:
     label = f"Tier {result.tier} · {result.tier_label}"
     if result.tier == TIER_PARAMETRIC:
         return style("warn", f"⚠ {label} — not from your materials")
+    if result.model_abstained:
+        return style("dim", f"{label} — abstained, the pages found do not answer this")
     if result.abstained:
         return style("dim", f"{label} — abstained, nothing above the score threshold")
     n = len(result.answer.citations)

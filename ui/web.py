@@ -248,6 +248,9 @@ class Handler(BaseHTTPRequestHandler):
                 "tier": result.tier,
                 "tier_label": result.tier_label,
                 "abstained": result.abstained,
+                # Two different failures wearing one word (BLOCKERS #17): nothing scored
+                # above tau, versus the model refusing pages that did. The card says which.
+                "model_abstained": result.model_abstained,
                 # Markers the model wrote that pointed at nothing. The draft on screen still
                 # has them; saying how many were removed is the difference between an answer
                 # that looks clean and one that is shown to have been checked.

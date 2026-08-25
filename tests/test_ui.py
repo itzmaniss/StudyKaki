@@ -141,6 +141,27 @@ def test_tier_1_abstention_shows_its_tier_and_says_it_abstained(cfg):
     assert "abstained" in rendered
 
 
+def test_a_model_refusal_is_not_reported_as_a_score_threshold_failure(cfg, hits):
+    """BLOCKERS #17: at top score 0.608 "nothing above the threshold" is simply false.
+
+    Retrieval accepted these hits and fitted them into a prompt; the model then used its §4
+    escape hatch. Same `abstained` flag, different failure, different words.
+    """
+    from answer.prompt import ABSTAIN_MESSAGE
+
+    result = grounded(cfg, hits, [ABSTAIN_MESSAGE])
+    assert result.abstained and result.model_abstained
+    rendered = render_result(result)
+    assert "score threshold" not in rendered
+    assert "do not answer this" in rendered
+
+
+def test_a_retrieval_gate_still_says_it_was_the_score(cfg):
+    result = generate_answer("q", generator=FakeGenerator(), cfg=cfg, hits=[])
+    assert result.abstained and not result.model_abstained
+    assert "score threshold" in render_result(result)
+
+
 def test_tier_3_answer_shows_its_tier_and_that_it_is_not_from_your_materials(cfg):
     rendered = render_result(ungrounded(cfg, ["general knowledge body"]))
     assert "Tier 3" in rendered

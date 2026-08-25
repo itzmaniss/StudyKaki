@@ -262,7 +262,9 @@ function ask(question){
         checked — ${r.dropped} invented citation${r.dropped===1?'':'s'} removed</span>`);
     // §9: when Tier 1 abstains, say so before offering ungrounded general knowledge.
     if (r.abstained && !tier3)
-      notes.push(`<span>Nothing in your documents scored above the threshold.</span>
+      notes.push(`<span>${r.model_abstained
+          ? 'The pages found do not answer this question.'
+          : 'Nothing in your documents scored above the threshold.'}</span>
         <button class="tier3btn" type="button" id="t3">Answer from general knowledge</button>`);
     if (notes.length){ ex.note.innerHTML = notes.join(' '); ex.note.classList.remove('hidden'); }
     const offer = ex.note.querySelector('#t3');

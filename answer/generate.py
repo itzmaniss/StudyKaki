@@ -374,6 +374,18 @@ class AnswerResult:
     def abstained(self) -> bool:
         return self.answer.abstained
 
+    @property
+    def model_abstained(self) -> bool:
+        """Did the *model* decline, on context retrieval had already accepted?
+
+        The two abstentions look identical in `Answer` and are not the same failure: one
+        means nothing scored above `tau`, the other means the model refused material that
+        did. Telling a student "nothing above the score threshold" when the top hit scored
+        0.608 is simply false (BLOCKERS #17). `context` is what separates them — it is
+        populated only once the §4 gate has been passed and blocks were fitted into a prompt.
+        """
+        return self.abstained and bool(self.context)
+
 
 class AnswerStream:
     """One query's answer, streamed. Iterate for deltas, then read `.result`.
