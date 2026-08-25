@@ -40,6 +40,7 @@ from models.registry import (
     MANIFEST_PATH,
     MANIFEST_SCHEMA_VERSION,
     ROLES,
+    VLM_LANGUAGE_MODEL_BIN_NAME,
     VLM_LANGUAGE_MODEL_XML_NAME,
     file_sha256,
     ov_version,
@@ -611,6 +612,22 @@ def _save_ov_tokenizer(
     )
 
 
+def _is_converted(ir_dir: Path) -> bool:
+    """Is there a usable IR here already? Mirrors `registry.ModelEntry.is_converted`.
+
+    `hf_vlm` writes no `openvino_model.{xml,bin}` at all, so the single-file check this
+    replaced was never satisfied for a VLM — meaning `scripts.setup` re-exported and
+    re-quantised the ~14-minute gemma-4 build on every run, and `--overwrite` meant nothing
+    for that kind. Both pairs are checked xml *and* bin, so a half-written export
+    (interrupted between the two) re-converts rather than being trusted.
+    """
+    pairs = (
+        (IR_XML_NAME, IR_BIN_NAME),
+        (VLM_LANGUAGE_MODEL_XML_NAME, VLM_LANGUAGE_MODEL_BIN_NAME),
+    )
+    return any(all((ir_dir / n).exists() for n in pair) for pair in pairs)
+
+
 def regenerate_tokenizer(name: str, cfg: Config, *, out_root: Path = IR_ROOT) -> Path:
     """Rewrite only `openvino_tokenizer.xml` beside an already-converted model.
 
@@ -632,7 +649,7 @@ def regenerate_tokenizer(name: str, cfg: Config, *, out_root: Path = IR_ROOT) ->
     ir_dir = _ir_dir(src, spec.precision, out_root)
     # `hf_vlm` exports a multi-part IR with no `openvino_model.xml` at all — the language
     # tower stands in as the "is this converted" marker, same rule as ModelEntry.is_converted.
-    if not any((ir_dir / n).exists() for n in (IR_XML_NAME, VLM_LANGUAGE_MODEL_XML_NAME)):
+    if not _is_converted(ir_dir):
         raise ConversionError(
             f"{src.name}: no converted IR at {ir_dir} — there is nothing to regenerate a "
             f"tokenizer beside. Run `uv run python -m scripts.setup --only {name}` first."
@@ -684,7 +701,7 @@ def convert(
 
     ir_dir = _ir_dir(src, spec.precision, out_root)
     started = datetime.now(UTC)
-    if (ir_dir / IR_XML_NAME).exists() and not overwrite:
+    if _is_converted(ir_dir) and not overwrite:
         log.info("convert.skip_existing", model=src.name, ir_dir=str(ir_dir))
     else:
         snapshot = snapshot_dir(src)
@@ -698,7 +715,13 @@ def convert(
             seconds=round((datetime.now(UTC) - started).total_seconds(), 1),
         )
 
-    bin_path = ir_dir / IR_BIN_NAME
+    # §3.1 rule 4 — `ir_sha256` is the model's real identity, and a `hf_vlm` export has no
+    # `openvino_model.bin` to hash. Its language tower is the pair `models/registry.py`
+    # already verifies against, so hashing anything else would record a fingerprint nothing
+    # checks. Same choice as `registry.verify_fingerprint`, deliberately.
+    bin_path = ir_dir / VLM_LANGUAGE_MODEL_BIN_NAME
+    if not bin_path.exists():
+        bin_path = ir_dir / IR_BIN_NAME
     return {
         "role": src.role,
         "hf_id": src.hf_id,

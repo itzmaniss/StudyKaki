@@ -36,7 +36,9 @@ from models.registry import (
     IR_BIN_NAME,
     IR_XML_NAME,
     MANIFEST_PATH,
+    VLM_LANGUAGE_MODEL_BIN_NAME,
     VLM_LANGUAGE_MODEL_XML_NAME,
+    file_sha256,
     load_manifest,
 )
 
@@ -173,6 +175,46 @@ def vlm_cfg(tmp_path):
     )
 
 
+def test_an_existing_vlm_ir_is_not_re_exported(tmp_path, vlm_cfg, monkeypatch):
+    """The skip check read `openvino_model.xml`, which `hf_vlm` never writes.
+
+    So every `scripts.setup` run re-exported and re-quantised the ~14-minute gemma-4 build,
+    and `--overwrite` was meaningless for that kind — it could not turn off a skip that
+    never happened.
+    """
+    src = source_for(vlm_cfg.models.generator.name)
+    ir_dir = tmp_path / f"{src.name}-{vlm_cfg.models.generator.precision}"
+    ir_dir.mkdir(parents=True)
+    (ir_dir / VLM_LANGUAGE_MODEL_XML_NAME).write_text("<not-a-real-ir/>")
+    (ir_dir / VLM_LANGUAGE_MODEL_BIN_NAME).write_bytes(b"weights")
+
+    def boom(*a, **kw):
+        raise AssertionError("re-exported an IR that was already on disk")
+
+    monkeypatch.setitem(convert_mod._CONVERTERS, "hf_vlm", boom)
+    monkeypatch.setattr(convert_mod, "snapshot_dir", boom)
+
+    entry = convert_mod.convert("generator", vlm_cfg, out_root=tmp_path)
+    assert entry["precision"] == vlm_cfg.models.generator.precision
+
+
+def test_a_vlm_entry_records_its_language_tower_as_the_fingerprint(tmp_path, vlm_cfg, monkeypatch):
+    """§3.1 rule 4 — `ir_sha256` is the model's identity, and it was recorded empty.
+
+    There is no `openvino_model.bin` in a multi-part export, so hashing that path produced
+    "". The language tower is the pair `models/registry.py` verifies against.
+    """
+    src = source_for(vlm_cfg.models.generator.name)
+    ir_dir = tmp_path / f"{src.name}-{vlm_cfg.models.generator.precision}"
+    ir_dir.mkdir(parents=True)
+    (ir_dir / VLM_LANGUAGE_MODEL_XML_NAME).write_text("<not-a-real-ir/>")
+    (ir_dir / VLM_LANGUAGE_MODEL_BIN_NAME).write_bytes(b"weights")
+
+    entry = convert_mod.convert("generator", vlm_cfg, out_root=tmp_path)
+    assert entry["ir_sha256"], "a VLM entry must carry a real fingerprint, not an empty one"
+    assert entry["ir_sha256"] == file_sha256(ir_dir / VLM_LANGUAGE_MODEL_BIN_NAME)
+
+
 def test_regenerate_tokenizer_accepts_a_multi_part_vlm_ir(tmp_path, vlm_cfg, monkeypatch):
     """`hf_vlm` writes no `openvino_model.xml`, so the single-file existence check rejected it.
 
@@ -184,6 +226,7 @@ def test_regenerate_tokenizer_accepts_a_multi_part_vlm_ir(tmp_path, vlm_cfg, mon
     ir_dir = tmp_path / f"{src.name}-{vlm_cfg.models.generator.precision}"
     ir_dir.mkdir(parents=True)
     (ir_dir / VLM_LANGUAGE_MODEL_XML_NAME).write_text("<not-a-real-ir/>")
+    (ir_dir / VLM_LANGUAGE_MODEL_BIN_NAME).write_bytes(b"weights")
 
     tokenizer, processor = FakeTokenizer(), FakeTokenizer()
     monkeypatch.setattr(convert_mod, "snapshot_dir", lambda s, **kw: tmp_path / "snapshot")
