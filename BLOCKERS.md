@@ -1137,3 +1137,58 @@ answer would do, and the golden set already carries the page the answer is on), 
 decision that Tamil answer quality is judged by eye before the demo. I have not built either —
 inventing a quality metric the architecture does not ask for is §11 scope creep, and this is a
 measurement design decision, not a coding one.
+
+---
+
+## 16. No generator IR can be built on this machine — NNCF's reduce ops have no arm64 executor
+
+Found 2026-08-25 converting `google/gemma-4-E2B-it` (branch `gemma-4`). Every precision fails
+in the same place, inside NNCF's weight compression:
+
+```
+[CPU] ReduceMin node 'ReduceMin_2233941'   (int4, group_size=128, ratio=0.8)
+[CPU] ReduceMin node 'ReduceMin_2167653'   (int8, group_size=-1, ratio=1.0)
+[CPU] ReduceMax node 'ReduceMax_1602448'   (fp16, no quantization_config at all)
+Supported Reduce executor is not found
+    src/plugins/intel_cpu/src/nodes/executors/reduce_list.hpp:70
+```
+
+NNCF computes compression scales by **running OpenVINO ops over each weight** rather than in
+numpy, so conversion needs a working CPU plugin, not just a working exporter. On arm64
+(BLOCKERS #1 — this is an M4 Pro) the Reduce executor for these shapes is not implemented.
+
+It is **not** a bit-width problem and **not** a Gemma 4 problem:
+- the three small sub-models (1, 115, 1 layers) compress fine at int8_sym per-channel;
+- the large language model fails at 4-bit, at 8-bit, and with compression switched off entirely.
+
+`qwen3-4b-instruct-int4` predates this and is already on disk, which is why it was never hit.
+
+**Consequence for the demo:** this machine can run models but cannot *produce* them. Any new
+generator — Gemma 4, a smaller Qwen, anything answering BLOCKERS #14's memory problem — has to
+be converted on the Intel laptop, where these executors exist. That is a sibling of #13a
+(`TextRerankPipeline` unusable on arm64) and #1 (no Intel GPU here): three separate places
+where the dev machine is not the target machine.
+
+**To continue on the Intel laptop** (nothing here is blocked on a decision, only on hardware):
+
+```bash
+git checkout gemma-4
+uv sync                                                   # transformers 5.5, optimum-intel 2.1
+uv run python -m scripts.setup --config configs/gemma4-e2b.yaml --only generator
+```
+
+That downloads 9.6 GB and converts INT4; `configs/gemma4-e2b-int8.yaml` does 8-bit. The HF
+cache does not travel in git, so the download repeats there.
+
+**Then the wiring that is still missing**: `answer/generate.py:load_generator` builds an
+`openvino_genai.LLMPipeline`. Gemma 4 E2B is any-to-any and exports as several IRs, so it loads
+through **`VLMPipeline`** instead — genai 2026.3 supports it (`visual_language/gemma4/classes.cpp`,
+`gemma4_unified`, `gemma4_mtp_embeddings`). `VLMPipeline.generate` takes the same
+`(prompt, config, streamer)` shape, so `OpenVinoGenerator.stream` should carry over unchanged.
+`models/registry.py` also assumes one `openvino_model.xml` per entry, which a multi-part VLM
+export does not produce — `is_converted` and `ir_sha256` will need to look at the language
+model part instead.
+
+**Open question this was meant to answer, still open:** whether Gemma 4 E2B answers Tamil
+better than Qwen3-4B, which abstains on 2 of 2 Tamil questions and scores groundedness 0.000
+across all 6 (see PROGRESS 2026-08-25).

@@ -1,0 +1,52 @@
+# Single source of truth — ARCHITECTURE.md §6. Nothing tunable is hardcoded elsewhere.
+#
+# `device: GPU` is the intent for the target machine (Intel i5 11th gen / Iris Xe).
+# Every model load falls back to CPU and logs which device it got, so this file stays
+# honest about intent even on hardware with no GPU plugin. See BLOCKERS.md.
+
+models:
+  # §6 names PP-OCRv6_mobile_det. No such public checkpoint exists — PaddlePaddle/PP-OCRv6_*
+  # returns 401 on the HF API. v5 mobile is the newest released and is what PaddleOCR ships.
+  # Deviation from the contract, recorded in BLOCKERS.md #6.
+  ocr_det:   { name: PP-OCRv5_mobile_det, device: GPU, precision: int8 }
+  ocr_rec:   { name: PP-OCRv5_mobile_rec, device: GPU, precision: int8 }
+  # §3 asks for a shared detector with per-script recognition heads. PP-OCRv5's default
+  # recogniser is Chinese+English; its charset has no Tamil, so Tamil pages decode to CJK
+  # noise at high confidence. Beyond §6's four models — recorded in BLOCKERS.md #6.
+  ocr_rec_taml: { name: ta_PP-OCRv5_mobile_rec,    device: GPU, precision: int8 }
+  ocr_rec_latn: { name: latin_PP-OCRv5_mobile_rec, device: GPU, precision: int8 }
+  embedder:  { name: bge-m3,              device: GPU, precision: int8 }
+  generator: { name: gemma-4-e2b-it,      device: CPU, precision: int8 }
+  # §10 V2. Present so the arm can be switched on; unused while retrieve.rerank.enabled is false.
+  reranker:  { name: bge-reranker-v2-m3,  device: GPU, precision: int8 }
+
+chunk:    { target_tokens: 400, overlap: 60, min_tokens: 80 }
+# tau recalibrated 2026-08-24 against the full 8-doc index and the 54-question golden set
+# (BLOCKERS #8). Measured cosine top-1: answerable 0.460-0.783, unanswerable 0.443-0.692 —
+# the ranges overlap almost completely, so tau is a trade, never a correct value.
+#
+# The safe window is [0.45, 0.46] and nothing wider: 2 of 5 unanswerable declined, 0 answerable
+# lost. It was [0.45, 0.52] before the cross-lingual Tamil questions existed, and they collapsed
+# it, because an English query against Tamil OCR scores 0.460-0.542 where monolingual Chinese
+# scores 0.731-0.783. The hardest-won answers sit lowest, right on top of the noise.
+#
+# Retrieval metrics are unaffected — recall is scored before the abstain decision.
+retrieve:
+  k: 20
+  n_context: 5
+  tau: 0.45
+  # §10 V2 arms — all off, so this file is the V1 baseline the before/after numbers compare
+  # against. eval/sweep.py flips them; nothing here changes without a number to justify it.
+  # top_n 10, not 20: v1.json's rank distribution puts the correct chunk at rank 11-20
+  # exactly zero times, so reranking deeper buys nothing and doubles the cost (§10).
+  rerank:  { enabled: false, top_n: 10 }
+  hybrid:  { enabled: false, rrf_k: 60, dense_weight: 1.0, lexical_weight: 1.0 }
+  rewrite: { enabled: false, trigger_max_tokens: 5 }
+
+# max_prompt_tokens: see core/config.py — OpenVINO INT4 CPU MatMul fails above ~7k tokens,
+# and Tamil hits that first because it tokenizes ~2x denser than English (BLOCKERS #11).
+generate: { max_new_tokens: 512, temperature: 0.2, max_prompt_tokens: 6000 }
+
+paths:
+  data_dir: data
+  ov_cache_dir: .ov_cache   # §7.2 — first GPU compile is slow, cached is seconds

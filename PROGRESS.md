@@ -371,3 +371,34 @@ Run it: `uv run python -m ui.web --docs data/pdfs` (`--port`, `--no-open`, `--in
 
 Next: nothing outstanding on the UI. V2 verdict above still stands — `git merge v2`, flip
 `retrieve.hybrid.enabled: true`, re-run the eval to confirm 0.939.
+
+## 2026-08-25 19:30 — branch `gemma-4`: Gemma 4 E2B converts nowhere on this machine
+
+Trying a smaller generator, against BLOCKERS #14 (V1 needs 13.5 GB steady) and the Tamil
+generation failure below. `google/gemma-4-E2B-it` — Apache-2.0, ungated, published 2026-07-20,
+pinned at `3e22461f`. ~5B raw weights that run as ~2B effective.
+
+Done:
+- `models/convert.py`: `gemma-4-e2b-it` source + a new `hf_vlm` kind. Gemma 4 is any-to-any and
+  its text tower does not stand alone — the per-layer embeddings are a separate graph — so it
+  exports through `OVModelForVisualCausalLM` (`image-text-to-text`), not `OVModelForCausalLM`.
+- Toolchain bumped for the `gemma4` architecture: transformers 4.53.3 -> 5.5.4, optimum
+  1.27 -> 2.3.0, optimum-intel 1.25.2 -> 2.1.0 (it carries the gemma4 OpenVINO exporter),
+  nncf 2.18 -> 3.3. **Suite stayed green through the bump: 835 passed, 8 skipped.** No runtime
+  module imports transformers — this touches conversion tooling only.
+- `configs/gemma4-e2b{,-int8,-fp16}.yaml` so the arm can be run without disturbing `base.yaml`
+  or the pinned v1 baseline.
+
+Not done, and not doable here: **BLOCKERS #16** — NNCF computes compression scales by running
+OpenVINO ops over each weight, and the Reduce executor has no arm64 implementation. int4, int8
+and uncompressed all die on the same node. This machine can run models but cannot build them.
+
+The three failures before that one were mine, not the machine's, and are fixed in the code:
+wrong export class (`image-to-text-with-past` is not registered for gemma4), `ratio=0.8` at
+8 bits (it is the INT4 share), `group_size=128` at 8 bits (must be -1).
+
+Verified: ruff clean, `uv lock --check` clean, `uv run pytest` -> 835 passed, 8 skipped.
+
+Next: continue on the Intel laptop — BLOCKERS #16 carries the three commands and the two
+wiring gaps (`VLMPipeline` in `load_generator`, multi-part IR in `registry.is_converted`).
+`main` is untouched; nothing here changes V1.

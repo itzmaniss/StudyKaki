@@ -54,7 +54,7 @@ DETOKENIZER_XML_NAME = "openvino_detokenizer.xml"
 # graph readable by OpenVINO's ONNX frontend without opset-upgrade churn.
 PADDLE_ONNX_OPSET = 14
 
-Kind = Literal["hf_encoder", "hf_causal_lm", "hf_reranker", "paddle"]
+Kind = Literal["hf_encoder", "hf_causal_lm", "hf_vlm", "hf_reranker", "paddle"]
 
 
 class ConversionError(RuntimeError):
@@ -118,6 +118,19 @@ SOURCES: dict[str, ModelSource] = {
         hf_id="Qwen/Qwen3-4B-Instruct-2507",
         hf_revision="cdbee75f17c01a7cc42f958dc650907174af0554",
         ignore_patterns=("original/*", "*.gguf"),
+    ),
+    # Branch experiment: a smaller generator, against BLOCKERS #14 (memory) and the Tamil
+    # generation failure. E2B is ~5B raw weights that run as ~2B effective — the per-layer
+    # embedding trick — so it converts like a 5B model and should run like a 2B one.
+    "gemma-4-e2b-it": ModelSource(
+        name="gemma-4-e2b-it",
+        role="generator",
+        kind="hf_vlm",
+        hf_id="google/gemma-4-E2B-it",
+        hf_revision="3e22461f65e89153144f8adb70e3b8c2cc9845a7",
+        # The checkpoint is any-to-any; this project reads text. The vision and audio towers
+        # are inside model.safetensors, so they come down with it — nothing to exclude.
+        ignore_patterns=("*.gguf", "*.task", "*.litertlm"),
     ),
     # configs/base.yaml names PP-OCRv6_mobile_det/rec. No such public checkpoint exists —
     # PaddlePaddle/PP-OCRv6_* returns 401 on the HF API. v5 mobile is the newest available
@@ -387,6 +400,62 @@ def convert_causal_lm(src: ModelSource, precision: str, out_root: Path) -> Path:
     return ir_dir
 
 
+def convert_vlm(src: ModelSource, precision: str, out_root: Path) -> Path:
+    """Gemma 4 E2B — one checkpoint, several IRs, loaded together by `VLMPipeline`.
+
+    E2B is any-to-any, and its text tower does not stand alone: the per-layer embeddings
+    that make ~5B weights run as ~2B effective are a *separate* graph the pipeline feeds in.
+    `OVModelForCausalLM` would export the language model by itself, which then has no way to
+    receive them — so this goes through the image-text-to-text export even though this
+    project only ever sends text.
+    """
+    # `OVModelForImageTextToText` infers the task `image-to-text-with-past`, which the gemma4
+    # exporter rejects; `OVModelForVisualCausalLM` is the class whose export_feature is the
+    # `image-text-to-text` that optimum registered for this architecture.
+    from optimum.intel import OVModelForVisualCausalLM, OVWeightQuantizationConfig
+
+    snapshot = snapshot_dir(src)
+    ir_dir = _ir_dir(src, precision, out_root)
+    bits = {"int4": 4, "int8": 8, "fp16": None, "fp32": None}
+    if precision not in bits:
+        raise ConversionError(f"{src.name}: unsupported generator precision {precision!r}")
+    bits = bits[precision]  # type: ignore[assignment]
+
+    log.info("convert.export_vlm", model=src.name, precision=precision)
+    # 8-bit takes no mixed-precision knobs at all: optimum-intel 2.1 requires ratio 1.0 and
+    # per-channel (`group_size=-1`), because `ratio` is the *INT4* share and there is no
+    # second precision to fall back to. 4-bit keeps `convert_causal_lm`'s settings, so the
+    # two generators are compressed the same way and the comparison is about the models.
+    # No compression at fp16/fp32. NNCF computes its scales by *running* OpenVINO ops over
+    # each weight, and on arm64 the language model's reduce lands on an executor the CPU
+    # plugin does not implement (`ReduceMin`, at both 4 and 8 bits — it is not a bit-width
+    # problem). An uncompressed export is the only one that completes on this machine; it
+    # costs ~10 GB of RAM, so it is a way to *evaluate* the model here, not to ship it.
+    quant = None
+    if bits == 4:
+        quant = OVWeightQuantizationConfig(bits=4, group_size=128, ratio=0.8, sym=True)
+    elif bits == 8:
+        quant = OVWeightQuantizationConfig(bits=8, group_size=-1, ratio=1.0, sym=True)
+    ov_model = OVModelForVisualCausalLM.from_pretrained(
+        snapshot, export=True, quantization_config=quant
+    )
+    ir_dir.mkdir(parents=True, exist_ok=True)
+    ov_model.save_pretrained(ir_dir)
+
+    from transformers import AutoProcessor, AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(snapshot)
+    tokenizer.save_pretrained(ir_dir)
+    _save_ov_tokenizer(tokenizer, ir_dir, with_detokenizer=True)
+    # VLMPipeline reads the processor config next to the IR; without it the pipeline cannot
+    # build the prompt template and fails at load, not at generate.
+    try:
+        AutoProcessor.from_pretrained(snapshot).save_pretrained(ir_dir)
+    except (OSError, ValueError) as e:
+        log.warning("convert.processor_unavailable", model=src.name, error=str(e))
+    return ir_dir
+
+
 def _is_pir(model_file: Path) -> bool:
     """PaddlePaddle 3.0 replaced the protobuf `.pdmodel` with a JSON PIR program.
 
@@ -526,6 +595,7 @@ def regenerate_tokenizer(name: str, cfg: Config, *, out_root: Path = IR_ROOT) ->
 _CONVERTERS = {
     "hf_encoder": convert_encoder,
     "hf_causal_lm": convert_causal_lm,
+    "hf_vlm": convert_vlm,
     "hf_reranker": convert_reranker,
     "paddle": convert_paddle,
 }
