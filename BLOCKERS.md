@@ -1074,3 +1074,66 @@ of generation. The English mean of 6.6 s hides that completely.
 If rerank ships, the honest options are a per-script `top_n` (rerank fewer candidates when the
 candidates are Tamil), or truncating the passage fed to the cross-encoder — which is safe here
 in a way it is not for generation, since the reranker only produces a score and never a citation.
+
+---
+
+## 14. V1 does not fit its own target machine — 13.5 GB steady, 24 GB peak
+
+ARCHITECTURE §0 targets an Intel i5 with **8-16 GB RAM**. Measured here (M4 Pro, 48 GB):
+
+| stage | peak RSS | steady RSS |
+|---|---|---|
+| generator loaded | 24 GB | 6.5 GB |
+| after first generation | 24 GB | **13.5 GB** |
+| + embedder + reranker | | **~17 GB** |
+
+The 24 GB is a transient spike while `LLMPipeline` compiles, not the working set —
+`resource.ru_maxrss` reports only peaks, which makes this easy to misread.
+
+**This is V1, not V2.** Even with every V2 arm off, the generator alone is 13.5 GB steady with a
+24 GB compile spike. On a 16 GB target it will swap or be killed; on 8 GB it cannot load.
+
+Tried, both ineffective:
+- `max_position_embeddings` 262144 -> 8192 — steady 13.52 -> 14.11 GB, i.e. nothing. GenAI does
+  not size the KV cache from it.
+- `KV_CACHE_PRECISION: u8` — no improvement.
+
+So there is no configuration fix. The options are structural:
+1. **Smaller generator.** Qwen3-1.7B INT4 would roughly quarter this. Costs answer quality.
+2. **Never hold two large models at once.** Load, use, release around each stage rather than
+   keeping embedder + reranker + generator resident. Helps ~2-4 GB and stops compile spikes
+   stacking; does not fix the 13.5 GB floor.
+3. **Restate the target hardware.** If the demo laptop has 32 GB, say so in §0 and move on.
+
+**Need a decision on which.** Nothing else in the build is blocked by this — but every latency
+and memory number produced on this machine is optimistic, and this is the one that flatters the
+pitch most, because 48 GB hides it completely.
+
+---
+
+## 15. `groundedness` cannot tell a correct answer from word salad
+
+§10 gates V2 on "recall@5 or groundedness". Measured on question 45 (Tamil) under rerank+hybrid:
+
+```
+answer:       ஜந்த்து இருார் ஜார் பூலியார் இயற்று இருார். [2]
+groundedness: 1.00
+```
+
+That is not Tamil. It is a malformed string with a valid citation marker attached, and it scores
+a perfect 1.00 — because `groundedness` measures *what fraction of emitted citation markers
+resolve to retrieved context*, which is exactly what it was built to measure (`eval/metrics.py`).
+It was never a fluency or correctness metric.
+
+BLOCKERS #11 recorded the same question at 1 chunk answering `ஜார்ஜ் பூல் [1]` — correct. So more
+context produced worse prose at unchanged groundedness.
+
+**Consequence: half of §10's gating rule is blind on Tamil.** An arm that degrades Tamil
+generation while keeping citations valid scores as an improvement. Any V2 groundedness number on
+this corpus should be read as "citations resolve", never as "answers are good".
+
+**Need:** either a second metric with teeth on generation quality (chrF against a reference
+answer would do, and the golden set already carries the page the answer is on), or an explicit
+decision that Tamil answer quality is judged by eye before the demo. I have not built either —
+inventing a quality metric the architecture does not ask for is §11 scope creep, and this is a
+measurement design decision, not a coding one.
