@@ -38,6 +38,17 @@ CPU = "CPU"
 IR_XML_NAME = "openvino_model.xml"
 IR_BIN_NAME = "openvino_model.bin"
 
+# §7.3 `hf_vlm` kind (models/convert.py:convert_vlm) exports through
+# `OVModelForVisualCausalLM`, which writes a multi-part IR instead of the single
+# `openvino_model.{xml,bin}` pair every other kind produces: the language tower, the text
+# and vision embedding towers, and (for Gemma 4) the per-layer embeddings each get their own
+# graph. `openvino_language_model.{xml,bin}` is the authoritative "is this converted / what's
+# its fingerprint" pair for such an entry — detected from file presence, not a manifest field,
+# so this module stays independent of convert.py's SOURCES/Kind table and no
+# MANIFEST_SCHEMA_VERSION bump is needed.
+VLM_LANGUAGE_MODEL_XML_NAME = "openvino_language_model.xml"
+VLM_LANGUAGE_MODEL_BIN_NAME = "openvino_language_model.bin"
+
 ROLES = (
     "ocr_det",
     "ocr_rec",
@@ -127,8 +138,27 @@ class ModelEntry:
         return self.ir_dir / IR_BIN_NAME
 
     @property
+    def vlm_language_model_xml(self) -> Path:
+        return self.ir_dir / VLM_LANGUAGE_MODEL_XML_NAME
+
+    @property
+    def vlm_language_model_bin(self) -> Path:
+        return self.ir_dir / VLM_LANGUAGE_MODEL_BIN_NAME
+
+    @property
+    def is_vlm(self) -> bool:
+        """Multi-part IR (§7.3 `hf_vlm` kind), detected by file presence on disk.
+
+        `openvino_genai.VLMPipeline` is what `answer/generate.py:load_generator` builds for
+        an entry that answers True here, in place of `LLMPipeline`.
+        """
+        return not self.ir_xml.exists() and self.vlm_language_model_xml.exists()
+
+    @property
     def is_converted(self) -> bool:
-        return self.ir_xml.exists() and self.ir_bin.exists()
+        if self.ir_xml.exists() and self.ir_bin.exists():
+            return True
+        return self.vlm_language_model_xml.exists() and self.vlm_language_model_bin.exists()
 
     @classmethod
     def from_row(cls, name: str, row: Mapping[str, Any], base_dir: Path) -> ModelEntry:
@@ -401,10 +431,13 @@ _SHA_CACHE: dict[tuple[str, int, int], str] = {}
 def ir_sha256(entry: ModelEntry) -> str:
     """§3.1 rule 4 — the weights are the identity, so hash them, don't trust the label.
 
+    A multi-part VLM entry (§7.3 `hf_vlm`) has no `openvino_model.bin`; the language model
+    part stands in as the weights that identify it, same as `is_converted`.
+
     Memoised on (path, size, mtime): re-hashing 2 GB of INT8 weights on every query would
     dominate retrieval latency, and any edit to the file moves mtime.
     """
-    bin_path = entry.ir_bin
+    bin_path = entry.vlm_language_model_bin if entry.is_vlm else entry.ir_bin
     if not bin_path.exists():
         if entry.recorded_ir_sha256:
             log.warning(

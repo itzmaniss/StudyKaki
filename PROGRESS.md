@@ -419,3 +419,65 @@ Verified: ruff clean, `uv lock --check` clean, `uv run pytest` -> 835 passed, 8 
 
 Next: #17 lists the four candidate fixes in order; the fourth is #16's Gemma 4 experiment,
 which needs the Intel laptop.
+
+## 2026-08-26 00:15 — models/registry.py + answer/generate.py: BLOCKERS #16's two wiring gaps
+
+Done, on branch `gemma-4`, in an isolated worktree with no real model weights (Windows
+sandbox this time, not the M4 Pro BLOCKERS #1 describes — see the environment note below):
+
+- `models/registry.py` — `ModelEntry` gained `is_vlm`, `vlm_language_model_xml`,
+  `vlm_language_model_bin`. §7.3's `hf_vlm` kind (`convert_vlm`) writes a multi-part IR
+  (`openvino_language_model.{xml,bin}` plus the vision/text-embedding towers) instead of
+  the single `openvino_model.{xml,bin}` pair every other kind produces, so `is_converted`
+  read a fully-converted `gemma-4-e2b-it` as not converted. `is_converted` and `ir_sha256`
+  now treat the language-model pair as authoritative when `openvino_model.xml` is absent —
+  detected from file presence, not a manifest field, so no `MANIFEST_SCHEMA_VERSION` bump
+  and `registry.py` still does not import `models/convert.py`'s `SOURCES`/`Kind` table
+  (asserted directly in `test_registry.py`).
+- `answer/generate.py:load_generator` branches on `entry.is_vlm` and builds
+  `genai.VLMPipeline` instead of `genai.LLMPipeline`. **Their constructors are not
+  call-compatible** — confirmed against the installed `openvino_genai==2026.3.0` package
+  directly (`VLMPipeline(models_path, "CPU", {"a": 1})` raises `TypeError: incompatible
+  constructor arguments`, since the text-only overload is `(models_path, device,
+  **kwargs)`, no positional `config`). `ov_config` is now passed as `**ov_config` for the
+  VLM branch, positionally for `LLMPipeline` as before. `OpenVinoGenerator` is untouched;
+  it only ever receives a pipeline instance.
+
+**Not done, and written up in full in BLOCKERS #16 instead of guessed:** whether
+`OpenVinoGenerator.stream`'s `self.pipe.generate(prompt, gen_cfg, streamer)` — three
+positional arguments — is safe for `VLMPipeline`. Introspecting the real package shows
+`VLMPipeline.generate` has nine overloads; every one taking `generation_config`/`streamer`
+positionally also requires an `images`/`videos`/`image` argument first, and the one
+pure-text overload (`generate(self, prompt, **kwargs)`) documents `generation_config` and
+`streamer` as keyword-only. That suggests the current call would raise `TypeError` against
+a real `VLMPipeline`, the same failure mode the constructor had. It could not be verified
+live — no Gemma 4 weights exist in this worktree (BLOCKERS #16: NNCF can't build them on
+arm64; this box can't either, it just has no weights at all), and probing an
+uninitialized `VLMPipeline` instance's `.generate` beyond its docstring **segfaults the
+interpreter**, so there is no safe way to exercise it here. Left `stream` byte-for-byte
+unchanged per this task's own instruction not to force an unverified change onto the
+Qwen3 path; BLOCKERS #16 carries the exact one-line fix to try (`generation_config=`,
+`streamer=` as keywords — a no-op for `LLMPipeline`, whose only overload names those same
+two parameters) and what to check before applying it.
+
+**Environment note:** this worktree's sandbox is Windows (`win32`), not the Apple M4 Pro
+BLOCKERS #1 describes — a different machine from the one the rest of this file narrates,
+for this one delegated task. Two pre-existing, unrelated Windows-only failures showed up
+running the full suite and are not touched: `tests/test_bench.py`, `test_dense.py`,
+`test_eval_harness.py`, `test_sweep.py` fail to collect (`eval/run.py` and `eval/bench.py`
+import the POSIX-only `resource` module); `tests/test_telemetry.py` (5 tests) and
+`tests/test_ui_web.py` (1 test) fail on missing IANA tzdata and a non-UTF8 default file
+encoding respectively. None of the five failing/non-collecting files were touched by this
+change, and confirmed unchanged in git status throughout.
+
+Verified: `uv run ruff format .` / `ruff check --fix .` clean. `uv run pytest
+tests/test_registry.py tests/test_generate.py -q` -> **99 passed** (49 in
+`test_registry.py`, 7 of them new multi-part-IR tests; 50 in `test_generate.py`, 4 of them
+new `load_generator` tests — that file had *zero* `load_generator` tests before this
+change). Full suite minus the five pre-existing/unrelated files above: all green except
+the 6 listed above. `uv lock --check` clean.
+
+Next: a live smoke test on the Intel laptop, once `gemma-4-e2b-it` is actually converted
+there (BLOCKERS #16's three commands) — confirms or refutes the `.generate()` call-shape
+finding, and is the only way to answer #17's open question (does Gemma 4 answer Tamil
+better than Qwen3-4B). Nothing else in #16 is outstanding.
