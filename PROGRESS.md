@@ -450,3 +450,33 @@ abstention, not the cited answer the plan expected — recorded as a new item in
 rather than tuned around, since it's a one-sample borderline score.
 
 Next: #16 (Gemma 4 download + INT4 convert) — running separately on this machine already.
+
+## 2026-08-25 21:45 — pyproject.toml: add torchvision, root cause of the gemma4 convert failure
+
+The developer's own `--only generator` run got past the trace and NNCF int4/int8 compression
+(all four submodels: language model, text + per-layer embeddings, vision embeddings) and wrote
+a complete IR to `models/ir/gemma-4-e2b-it-int4/`, then failed at the very last step:
+`AutoProcessor.from_pretrained(snapshot).save_pretrained(ir_dir)` in
+`models/convert.py:convert_vlm` raised `Gemma4VideoProcessor requires the Torchvision library`.
+
+Root cause, not the trace-check crash the developer's paste showed and BLOCKERS #16 predicted
+(`Supported Reduce executor is not found`, arm64-specific) — that step passed clean on a
+same-machine re-run, so it looks non-deterministic under load rather than a real blocker here.
+The `AutoProcessor` call is already wrapped in `try: ... except (OSError, ValueError)` for the
+case where a model genuinely has no processor (`convert.py:452`), but `ImportError` isn't in
+that tuple, so a *missing optional dependency* took down the whole conversion instead of
+logging the intended warning and continuing.
+
+`torchvision` was never in the gemma4 toolchain bump (BLOCKERS #16 listed transformers,
+optimum, optimum-intel, nncf) — it's Gemma4Processor's own hard import for the video half of
+its any-to-any support, needed even though this project only sends text. Added
+`torchvision>=0.23.0` (`uv add`, resolved to 0.23.0 against the existing `torch<2.9` pin).
+Confirmed in isolation: `AutoProcessor.from_pretrained(snapshot)` now returns a
+`Gemma4Processor` instead of raising.
+
+Verified: ruff clean, `uv run pytest -q` exit 0 (unaffected — this dependency is conversion-
+tooling only, no runtime module imports it), `uv lock --check` clean.
+
+Re-running `--only generator` now to get a complete IR with the processor config VLMPipeline
+needs. Left the `except` clause as-is rather than widening it to `ImportError` — the fix is
+having the dependency, not swallowing its absence.
