@@ -342,3 +342,32 @@ Branch `v2`, 15 commits, `main` untouched. Suite: 817 passed, 8 skipped.
 
 Recommended next action: `git merge v2` (all arms still default off), then flip
 `retrieve.hybrid.enabled: true` and re-run `eval/run.py --retriever dense` to confirm 0.939.
+
+## 2026-08-25 14:05 — ui/web.py, ui/index.html
+
+Done: browser UI, for when the demo needs a screen rather than a shell. `http.server` + one
+HTML file — §0.1 pins the dependency set and carries no web framework, so no Streamlit and no
+FastAPI. Binds 127.0.0.1, loads no CDN font or script, serves cited PDFs from the local
+registry: the page works with the wifi off, which is the pitch (§0.3). `ui/app.py` stays the
+reference UI; this is the same `Session` wiring behind a page.
+
+Answers stream over SSE. Every answer carries its tier (§9), and Tier 3 renders as a
+warning-framed card with the literal disclaimer, no citations, and the abstention said out loud
+first — with a one-click "answer from general knowledge" offer, so the opt-in stays an opt-in.
+Sources show the page, the heading path and **the first 220 characters of the cited chunk**, so
+grounding is legible without opening the PDF. When `answer/cite.py` drops an invented marker
+the card says so ("checked — 1 invented citation removed") rather than silently swapping in a
+cleaner answer.
+
+Fixed while wiring it: `meta()` read `retriever.index`, which is `None` under
+`HybridRetriever` (its index sits on the dense arm) — the shipping config would have reported
+an empty corpus in the header.
+
+Verified: `uv run pytest -q` -> **835 passed, 8 skipped** (18 in `tests/test_ui_web.py`), ruff
+and `uv lock --check` clean. Driven in a real browser against a fake backend: streaming,
+abstain -> Tier 3, invented-marker removal, Tamil/Chinese rendering, light and dark.
+
+Run it: `uv run python -m ui.web --docs data/pdfs` (`--port`, `--no-open`, `--index`).
+
+Next: nothing outstanding on the UI. V2 verdict above still stands — `git merge v2`, flip
+`retrieve.hybrid.enabled: true`, re-run the eval to confirm 0.939.

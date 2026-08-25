@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Study Assistant</title>
+<!-- Inline, not a file: a /favicon.ico round-trip is the one request this page would
+     otherwise make, and it 404s in the console during a demo. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232f6f62'/%3E%3Crect x='9' y='8' width='14' height='16' rx='2' fill='%23faf9f7'/%3E%3Crect x='9' y='8' width='4' height='16' fill='%236fbfa9'/%3E%3C/svg%3E">
+<style>
+/* No webfonts: §0.3 forbids the network at runtime, and a CDN font is a network call. */
+:root{
+  --bg:#faf9f7; --panel:#fff; --ink:#1a1917; --muted:#6b6660; --faint:#918a82; --line:#e5e1db;
+  --accent:#2f6f62; --accent-soft:#e8f0ed; --on-accent:#fff;
+  --warn:#8a5a1b; --warn-soft:#fdf3e3;
+  --radius:12px; --shadow:0 1px 2px rgba(26,25,23,.04),0 8px 24px -18px rgba(26,25,23,.35);
+  --sans:ui-sans-serif,-apple-system,"Segoe UI",Roboto,"Noto Sans","Noto Sans Tamil","Noto Sans SC",sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root{--bg:#141413;--panel:#1c1b1a;--ink:#eeece8;--muted:#9a938a;--faint:#7d766e;--line:#2e2c29;
+        --accent:#6fbfa9;--accent-soft:#1d2f2a;--on-accent:#10201c;
+        --warn:#d9a441;--warn-soft:#2e2517;
+        --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px -18px rgba(0,0,0,.8);}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased}
+.wrap{max-width:780px;margin:0 auto;padding:56px 24px 88px}
+.hidden{display:none}
+
+/* --- masthead ------------------------------------------------------------------ */
+header{display:flex;align-items:center;gap:11px;margin-bottom:6px}
+h1{font-size:21px;font-weight:600;letter-spacing:-.015em;margin:0}
+.badge{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--accent);
+       background:var(--accent-soft);border-radius:999px;padding:4px 10px;font-weight:600;
+       white-space:nowrap}
+.sub{color:var(--muted);font-size:14.5px;margin:0 0 30px}
+
+/* --- ask ----------------------------------------------------------------------- */
+form{display:flex;gap:9px}
+input[type=text]{flex:1;min-width:0;font:inherit;color:var(--ink);background:var(--panel);
+  border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;outline:none;
+  box-shadow:var(--shadow);transition:border-color .15s,box-shadow .15s}
+input[type=text]::placeholder{color:var(--faint)}
+input[type=text]:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+button{font:inherit;font-weight:600;color:var(--on-accent);background:var(--accent);border:0;
+  border-radius:var(--radius);padding:14px 22px;cursor:pointer;transition:opacity .15s}
+button:disabled{opacity:.45;cursor:default}
+
+.opts{display:flex;flex-wrap:wrap;gap:6px 20px;color:var(--muted);font-size:13px;margin:12px 2px 0}
+.opts label{display:flex;align-items:center;gap:6px;cursor:pointer}
+.opts input{accent-color:var(--accent);margin:0}
+
+.examples{display:flex;flex-wrap:wrap;gap:7px;margin:20px 0 4px}
+.chip{font:inherit;font-size:13px;font-weight:400;color:var(--muted);background:var(--panel);
+  border:1px solid var(--line);border-radius:999px;padding:6px 13px;cursor:pointer;
+  transition:border-color .15s,color .15s}
+.chip:hover{border-color:var(--accent);color:var(--accent)}
+
+/* --- one question and its answer ------------------------------------------------ */
+.ex{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:22px 24px 20px;margin-top:22px;box-shadow:var(--shadow);
+    animation:rise .28s cubic-bezier(.2,.7,.3,1)}
+@keyframes rise{from{opacity:0;transform:translateY(6px)}}
+.ex.ungrounded{background:var(--warn-soft);border-color:var(--warn)}
+
+.qtext{font-size:15px;font-weight:600;color:var(--ink);margin:0 0 14px;
+       padding-left:13px;border-left:2px solid var(--line)}
+
+.tier{display:flex;align-items:center;gap:8px;font-size:11.5px;font-weight:600;
+  letter-spacing:.05em;text-transform:uppercase;color:var(--accent);margin-bottom:12px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--accent);flex:none}
+.tier.thinking .dot{animation:pulse 1.1s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.25;transform:scale(.7)}}
+.tier.ungrounded{color:var(--warn)} .tier.ungrounded .dot{background:var(--warn)}
+.clock{margin-left:auto;font-family:var(--mono);font-size:11px;letter-spacing:0;
+       text-transform:none;color:var(--faint);font-weight:400}
+
+.answer{font-size:17px;line-height:1.65;white-space:pre-wrap;overflow-wrap:break-word;margin:0}
+.answer code{font-family:var(--mono);font-size:14px;background:var(--accent-soft);
+  border-radius:5px;padding:1px 5px}
+.answer .marker{color:var(--accent);font-weight:600;font-size:12px;
+  vertical-align:super;text-decoration:none;padding:0 1px}
+.answer .marker:hover{text-decoration:underline}
+.caret{display:inline-block;width:7px;height:17px;background:var(--accent);
+  vertical-align:-2px;animation:blink 1s steps(2) infinite}
+@keyframes blink{50%{opacity:0}}
+.err{color:var(--warn)}
+
+.note{margin-top:14px;font-size:13px;color:var(--muted);display:flex;flex-wrap:wrap;
+      align-items:center;gap:9px}
+.note .why{border-bottom:1px dotted var(--line);cursor:help}
+.tier3btn{font:inherit;font-size:12.5px;font-weight:600;color:var(--accent);
+  background:transparent;border:1px solid var(--line);border-radius:999px;padding:4px 12px}
+.tier3btn:hover{border-color:var(--accent)}
+
+/* --- sources -------------------------------------------------------------------- */
+.block{margin-top:20px;padding-top:18px;border-top:1px solid var(--line)}
+h2{font-size:11.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
+   color:var(--faint);margin:0 0 13px}
+ol.cites{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:14px}
+ol.cites li{display:flex;gap:12px}
+.n{flex:none;width:23px;height:23px;border-radius:7px;background:var(--accent-soft);
+   color:var(--accent);font-size:12px;font-weight:600;display:grid;place-items:center}
+.cite{min-width:0}
+.cite a{color:var(--ink);text-decoration:none;border-bottom:1px solid var(--line);font-weight:550}
+.cite a:hover{border-color:var(--accent);color:var(--accent)}
+.cite .where{color:var(--muted);font-size:13px;margin-left:8px}
+.snippet{color:var(--muted);font-size:13.5px;line-height:1.55;margin-top:3px;
+  padding-left:11px;border-left:2px solid var(--line)}
+li:target .n{background:var(--accent);color:var(--on-accent)}
+
+.tele{display:flex;flex-wrap:wrap;gap:6px 24px;font-family:var(--mono);font-size:11.5px;
+      color:var(--faint)}
+.tele b{font-weight:600;color:var(--muted)}
+
+/* --- footer stack ---------------------------------------------------------------- */
+footer{margin-top:44px;padding-top:18px;border-top:1px solid var(--line);
+  display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center;
+  font-family:var(--mono);font-size:11.5px;color:var(--faint)}
+footer .k{color:var(--muted)}
+footer .offline{color:var(--accent)}
+@media (max-width:560px){
+  .wrap{padding:32px 16px 64px}
+  form{flex-wrap:wrap} button{flex:1}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Study Assistant</h1>
+    <span class="badge" id="corpus">local corpus</span>
+  </header>
+  <p class="sub">Answers grounded in your own documents, with the page they came from. Runs entirely offline.</p>
+
+  <form id="f" autocomplete="off">
+    <input type="text" id="q" placeholder="Ask about your documents…" required autofocus>
+    <button id="go" type="submit">Ask</button>
+  </form>
+  <div class="opts">
+    <label><input type="checkbox" id="tier3"> Allow general knowledge if not found</label>
+    <label><input type="checkbox" id="trace" checked> Show timings</label>
+  </div>
+  <div class="examples" id="examples"></div>
+
+  <div id="feed"></div>
+
+  <footer id="stack"><span class="offline">no network at runtime</span></footer>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+// The generator writes markdown whether or not it was asked to, and a study answer strewn
+// with literal asterisks reads on screen as a broken renderer. Inline emphasis only — no
+// block parser, no library, and it runs on already-escaped text so nothing here can inject.
+const inline = html => html
+  .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+  .replace(/(^|[\s([])\*([^*\n]+)\*/g, '$1<em>$2</em>')
+  .replace(/`([^`\n]+)`/g, '<code>$1</code>');
+
+// [1] / [2][3] become superscript links to the matching source below the answer.
+const withMarkers = text =>
+  inline(esc(text)).replace(/\[(\d+)\]/g, (m,n)=>`<a class="marker" href="#cite-${n}">[${n}]</a>`);
+
+fetch('/meta').then(r=>r.json()).then(m=>{
+  $('corpus').textContent = `${m.documents} doc${m.documents===1?'':'s'} · ${m.chunks.toLocaleString()} chunks`;
+  $('examples').innerHTML = (m.examples||[])
+    .map(q=>`<button class="chip" type="button">${esc(q)}</button>`).join('');
+  document.querySelectorAll('.chip').forEach(c => c.onclick = () => ask(c.textContent));
+  // §7.4 evidence, and the point of the whole project: what loaded, and where it ran.
+  $('stack').insertAdjacentHTML('afterbegin', (m.stack||[])
+    .map(([k,v])=>`<span><span class="k">${esc(k)}</span> ${esc(v)}</span>`).join(''));
+}).catch(()=>{});
+
+// One question, one card. The feed is newest-first so nothing scrolls during a demo.
+function newExchange(question){
+  const el = document.createElement('article');
+  el.className = 'ex';
+  el.innerHTML = `
+    <p class="qtext"></p>
+    <div class="tier thinking"><span class="dot"></span><span class="label">retrieving</span>
+      <span class="clock"></span></div>
+    <p class="answer" aria-live="polite"><span class="caret"></span></p>
+    <div class="note hidden"></div>
+    <section class="block sources hidden"><h2>Sources</h2><ol class="cites"></ol></section>
+    <section class="block tele-block hidden"><h2>Telemetry</h2><div class="tele"></div></section>`;
+  el.querySelector('.qtext').textContent = question;
+  $('feed').prepend(el);
+
+  const at = Date.now();
+  const clock = el.querySelector('.clock');
+  const timer = setInterval(() => { clock.textContent = ((Date.now()-at)/1000).toFixed(1)+' s'; }, 100);
+  return {
+    el,
+    tier: el.querySelector('.tier'),
+    label: el.querySelector('.label'),
+    answer: el.querySelector('.answer'),
+    note: el.querySelector('.note'),
+    sources: el.querySelector('.sources'),
+    cites: el.querySelector('.cites'),
+    teleBlock: el.querySelector('.tele-block'),
+    tele: el.querySelector('.tele'),
+    stop(){ clearInterval(timer); clock.textContent=''; this.tier.classList.remove('thinking'); }
+  };
+}
+
+function renderCites(list){
+  return list.map(c => `
+    <li id="cite-${c.n}"><span class="n">${c.n}</span>
+      <div class="cite">
+        <div>${c.url ? `<a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.doc)}</a>`
+                     : esc(c.doc)}<span class="where">${esc(c.where)}</span></div>
+        ${c.snippet ? `<div class="snippet">${esc(c.snippet)}</div>` : ''}
+      </div></li>`).join('');
+}
+
+let source = null;
+
+function ask(question){
+  question = (question||'').trim();
+  if (!question) return;
+  if (source){ source.close(); source = null; }
+  $('q').value = question;
+
+  const ex = newExchange(question);
+  $('go').disabled = true;
+
+  let draft = '';
+  const tier3 = $('tier3').checked;
+  source = new EventSource('/ask?q=' + encodeURIComponent(question) + '&tier3=' + (tier3?'1':'0'));
+
+  const finish = () => { ex.stop(); $('go').disabled = false;
+                         if (source){ source.close(); source = null; } };
+
+  // Deltas are provisional: cite.verify() runs after the last token, so a marker visible
+  // here can be gone from the verified answer. Replaced wholesale on 'done'.
+  source.addEventListener('delta', ev => {
+    if (!draft) ex.label.textContent = 'generating';
+    draft += JSON.parse(ev.data);
+    ex.answer.innerHTML = inline(esc(draft)) + '<span class="caret"></span>';
+  });
+
+  source.addEventListener('done', ev => {
+    const r = JSON.parse(ev.data);
+    ex.answer.innerHTML = withMarkers(r.text) || '<span class="err">empty answer</span>';
+    ex.label.textContent = `tier ${r.tier} · ${r.tier_label}` + (r.abstained ? ' · abstained' : '');
+    // §9's "visually distinct": warning colours, warning icon, and the tier said in words.
+    if (r.ungrounded){
+      ex.el.classList.add('ungrounded');
+      ex.tier.classList.add('ungrounded');
+      ex.label.textContent = '⚠ ' + ex.label.textContent;
+    }
+
+    const notes = [];
+    // The one thing a grounded-answer demo should say out loud: the citations were checked.
+    if (r.dropped > 0)
+      notes.push(`<span class="why" title="answer/cite.py drops markers that point at no retrieved block">
+        checked — ${r.dropped} invented citation${r.dropped===1?'':'s'} removed</span>`);
+    // §9: when Tier 1 abstains, say so before offering ungrounded general knowledge.
+    if (r.abstained && !tier3)
+      notes.push(`<span>Nothing in your documents scored above the threshold.</span>
+        <button class="tier3btn" type="button" id="t3">Answer from general knowledge</button>`);
+    if (notes.length){ ex.note.innerHTML = notes.join(' '); ex.note.classList.remove('hidden'); }
+    const offer = ex.note.querySelector('#t3');
+    if (offer) offer.onclick = () => { $('tier3').checked = true; ask(question); };
+
+    if (r.citations && r.citations.length){
+      ex.cites.innerHTML = renderCites(r.citations);
+      ex.sources.classList.remove('hidden');
+    }
+    if ($('trace').checked && r.telemetry){
+      ex.tele.innerHTML = Object.entries(r.telemetry)
+        .map(([k,v]) => `<span>${esc(k)} <b>${esc(v)}</b></span>`).join('');
+      ex.teleBlock.classList.remove('hidden');
+    }
+    finish();
+  });
+
+  source.addEventListener('failed', ev => {
+    ex.answer.innerHTML = `<span class="err">${esc(JSON.parse(ev.data))}</span>`;
+    ex.label.textContent = 'failed';
+    finish();
+  });
+
+  source.onerror = () => {
+    if (!source) return;
+    ex.answer.innerHTML = '<span class="err">lost the connection to the local server</span>';
+    ex.label.textContent = 'failed';
+    finish();
+  };
+}
+
+$('f').onsubmit = e => { e.preventDefault(); ask($('q').value); };
+</script>
+</body>
+</html>
