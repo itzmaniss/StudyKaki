@@ -40,6 +40,7 @@ from models.registry import (
     MANIFEST_PATH,
     MANIFEST_SCHEMA_VERSION,
     ROLES,
+    VLM_LANGUAGE_MODEL_XML_NAME,
     file_sha256,
     ov_version,
 )
@@ -56,6 +57,10 @@ DETOKENIZER_XML_NAME = "openvino_detokenizer.xml"
 PADDLE_ONNX_OPSET = 14
 
 Kind = Literal["hf_encoder", "hf_causal_lm", "hf_vlm", "hf_reranker", "paddle"]
+
+#: Kinds whose runtime *emits* text and therefore needs a detokenizer beside the tokenizer.
+#: Encoders and rerankers only ever consume it, so they save the tokenizer alone.
+_CHAT_KINDS: frozenset[str] = frozenset({"hf_causal_lm", "hf_vlm"})
 
 
 class ConversionError(RuntimeError):
@@ -613,13 +618,21 @@ def regenerate_tokenizer(name: str, cfg: Config, *, out_root: Path = IR_ROOT) ->
     conversion re-quantises the weights, which produces a different `ir_sha256` and so
     invalidates every index built against the old one (§3.1 rule 4). A tokenizer defect
     is not a reason to force a re-index.
+
+    Mirrors whatever the entry's own converter writes on the tokenizer side, which for
+    `hf_vlm` is more than one file: the chat template is patched for minja *before* saving
+    (`openvino_tokenizers` bakes it into the tokenizer IR's rt_info, and `VLMPipeline` reads
+    the baked copy, not the loose `chat_template.jinja`), and the processor config is
+    rewritten too, since `VLMPipeline` will not load without it.
     """
     from models.registry import spec_for
 
     _, spec = spec_for(name, cfg)
     src = source_for(spec.name)
     ir_dir = _ir_dir(src, spec.precision, out_root)
-    if not (ir_dir / IR_XML_NAME).exists():
+    # `hf_vlm` exports a multi-part IR with no `openvino_model.xml` at all — the language
+    # tower stands in as the "is this converted" marker, same rule as ModelEntry.is_converted.
+    if not any((ir_dir / n).exists() for n in (IR_XML_NAME, VLM_LANGUAGE_MODEL_XML_NAME)):
         raise ConversionError(
             f"{src.name}: no converted IR at {ir_dir} — there is nothing to regenerate a "
             f"tokenizer beside. Run `uv run python -m scripts.setup --only {name}` first."
@@ -629,8 +642,19 @@ def regenerate_tokenizer(name: str, cfg: Config, *, out_root: Path = IR_ROOT) ->
 
     snapshot = snapshot_dir(src)
     tokenizer = AutoTokenizer.from_pretrained(snapshot)
+    _fix_chat_template_for_minja(tokenizer, model=src.name)
     tokenizer.save_pretrained(ir_dir)
-    _save_ov_tokenizer(tokenizer, ir_dir, with_detokenizer=src.kind == "hf_causal_lm")
+    _save_ov_tokenizer(tokenizer, ir_dir, with_detokenizer=src.kind in _CHAT_KINDS)
+
+    if src.kind == "hf_vlm":
+        from transformers import AutoProcessor
+
+        try:
+            processor = AutoProcessor.from_pretrained(snapshot)
+            _fix_chat_template_for_minja(processor, model=src.name)
+            processor.save_pretrained(ir_dir)
+        except (OSError, ValueError) as e:
+            log.warning("convert.processor_unavailable", model=src.name, error=str(e))
     return ir_dir
 
 

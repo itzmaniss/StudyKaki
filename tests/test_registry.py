@@ -220,6 +220,19 @@ def test_neither_layout_present_is_not_converted(tmp_path):
     assert not entry.is_converted
 
 
+def test_compile_xml_points_at_the_language_tower_for_a_vlm(tmp_path):
+    """§7.2 warm path: a multi-part IR has no `openvino_model.xml` to compile at all."""
+    path = write_vlm_manifest(tmp_path)
+    entry = load_manifest(path).by_name("gemma-4-e2b-it")
+    assert entry.compile_xml == entry.vlm_language_model_xml
+    assert entry.compile_xml.exists()
+
+
+def test_compile_xml_is_the_plain_ir_for_every_other_kind(manifest):
+    entry = load_manifest(manifest).by_name("bge-m3")
+    assert entry.compile_xml == entry.ir_xml
+
+
 def test_vlm_language_model_xml_without_its_bin_is_not_converted(tmp_path):
     """A partial write (xml landed, bin did not) must not read as converted."""
     path = write_vlm_manifest(tmp_path, build_ir=False)

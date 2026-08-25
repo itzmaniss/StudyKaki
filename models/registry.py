@@ -155,6 +155,18 @@ class ModelEntry:
         return not self.ir_xml.exists() and self.vlm_language_model_xml.exists()
 
     @property
+    def compile_xml(self) -> Path:
+        """The graph `ov.Core.compile_model` should be pointed at for this entry.
+
+        For a multi-part VLM IR there is no `openvino_model.xml` to compile, so this is the
+        language tower — the dominant cost of the §7.2 cache warm, and the only part of a
+        `VLMPipeline` this text-only project ever exercises. The vision and embedding towers
+        stay cold; warming them would mean building a `VLMPipeline` here, which would drag
+        `openvino_genai` into a module that deliberately depends only on `openvino`.
+        """
+        return self.vlm_language_model_xml if self.is_vlm else self.ir_xml
+
+    @property
     def is_converted(self) -> bool:
         if self.ir_xml.exists() and self.ir_bin.exists():
             return True
@@ -380,7 +392,7 @@ def _compile_with_fallback(
             )
             continue
         try:
-            compiled = core.compile_model(str(entry.ir_xml), dev, ov_config)
+            compiled = core.compile_model(str(entry.compile_xml), dev, ov_config)
         except RuntimeError as e:
             last_error = e
             log.warning("model.compile_failed", model=entry.name, device=dev, error=str(e))

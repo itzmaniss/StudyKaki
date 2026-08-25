@@ -32,7 +32,13 @@ from models.convert import (
     regenerate_tokenizer,
     source_for,
 )
-from models.registry import IR_BIN_NAME, IR_XML_NAME, MANIFEST_PATH, load_manifest
+from models.registry import (
+    IR_BIN_NAME,
+    IR_XML_NAME,
+    MANIFEST_PATH,
+    VLM_LANGUAGE_MODEL_XML_NAME,
+    load_manifest,
+)
 
 TEXTS = [
     "Photosynthesis converts light energy into chemical energy stored in glucose.",
@@ -152,6 +158,49 @@ def test_regenerate_tokenizer_leaves_the_model_weights_byte_identical(tmp_path, 
 def test_regenerate_tokenizer_refuses_when_there_is_no_ir_to_sit_beside(tmp_path, cfg):
     with pytest.raises(ConversionError, match="no converted IR"):
         regenerate_tokenizer("embedder", cfg, out_root=tmp_path)
+
+
+# --- ...and must handle the multi-part `hf_vlm` layout (BLOCKERS #16) ------------------
+
+
+@pytest.fixture
+def vlm_cfg(tmp_path):
+    base = load_config(Path("configs/gemma4-e2b-int8.yaml"))
+    return base.model_copy(
+        update={
+            "paths": PathsConfig(data_dir=tmp_path / "data", ov_cache_dir=tmp_path / "ov_cache")
+        }
+    )
+
+
+def test_regenerate_tokenizer_accepts_a_multi_part_vlm_ir(tmp_path, vlm_cfg, monkeypatch):
+    """`hf_vlm` writes no `openvino_model.xml`, so the single-file existence check rejected it.
+
+    It also needs a detokenizer (the VLM path emits text) and a rewritten processor config,
+    which is what `VLMPipeline` reads the chat template out of at load.
+    """
+    src = source_for(vlm_cfg.models.generator.name)
+    assert src.kind == "hf_vlm"
+    ir_dir = tmp_path / f"{src.name}-{vlm_cfg.models.generator.precision}"
+    ir_dir.mkdir(parents=True)
+    (ir_dir / VLM_LANGUAGE_MODEL_XML_NAME).write_text("<not-a-real-ir/>")
+
+    tokenizer, processor = FakeTokenizer(), FakeTokenizer()
+    monkeypatch.setattr(convert_mod, "snapshot_dir", lambda s, **kw: tmp_path / "snapshot")
+    monkeypatch.setattr(
+        "transformers.AutoTokenizer.from_pretrained", classmethod(lambda cls, *a, **kw: tokenizer)
+    )
+    monkeypatch.setattr(
+        "transformers.AutoProcessor.from_pretrained", classmethod(lambda cls, *a, **kw: processor)
+    )
+    calls = record_saves(monkeypatch)
+
+    out = regenerate_tokenizer("generator", vlm_cfg, out_root=tmp_path)
+
+    assert out == ir_dir
+    assert [c["path"].name for c in calls] == [TOKENIZER_XML_NAME, DETOKENIZER_XML_NAME]
+    assert tokenizer.saved_to == [ir_dir]
+    assert processor.saved_to == [ir_dir], "VLMPipeline will not load without the processor config"
 
 
 # --- the artefact in models/ir/, when it is actually on disk --------------------------
