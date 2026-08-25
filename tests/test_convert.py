@@ -26,6 +26,7 @@ from models.convert import (
     DETOKENIZER_XML_NAME,
     TOKENIZER_XML_NAME,
     ConversionError,
+    _relative_to_manifest,
     _save_ov_tokenizer,
     regenerate_tokenizer,
     source_for,
@@ -247,3 +248,19 @@ def test_the_manifest_on_disk_is_the_schema_the_registry_expects():
     raw = json.loads(MANIFEST_PATH.read_text())
     assert raw["generated_by"] == "models/convert.py"
     assert raw["models"], "manifest lists no models"
+
+
+def test_manifest_ir_dir_is_always_forward_slashed(tmp_path):
+    """The manifest is committed to git and read on every platform (§7.3).
+
+    `WindowsPath.__str__` emits `\\`, which is not a path separator on the machines this
+    same manifest also has to load on — regression for the gemma-4 entry that shipped with
+    `ir\\gemma-4-e2b-it-int4` from a Windows conversion run.
+    """
+    manifest_path = tmp_path / "models" / "manifest.json"
+    ir_dir = tmp_path / "models" / "ir" / "some-model-int4"
+    ir_dir.mkdir(parents=True)
+
+    relative = _relative_to_manifest(ir_dir, manifest_path)
+    assert "\\" not in relative
+    assert relative == "ir/some-model-int4"

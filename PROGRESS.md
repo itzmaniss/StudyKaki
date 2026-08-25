@@ -480,3 +480,31 @@ tooling only, no runtime module imports it), `uv lock --check` clean.
 Re-running `--only generator` now to get a complete IR with the processor config VLMPipeline
 needs. Left the `except` clause as-is rather than widening it to `ImportError` — the fix is
 having the dependency, not swallowing its absence.
+
+## 2026-08-25 22:05 — models/convert.py: gemma-4-e2b-it conversion completes; manifest path bug
+
+The re-run with `torchvision` installed **converted clean**: full multi-part IR (language
+model, text + per-layer embeddings, vision embeddings, tokenizer, detokenizer, processor
+config) written to `models/ir/gemma-4-e2b-it-int4/`, 625.9s, no `Reduce executor` failure at
+all on this hardware (that failure was arm64-specific, per BLOCKERS #16). Manifest updated.
+
+Caught before committing: `_relative_to_manifest` (`models/convert.py:649`) used `str(Path)`
+for the manifest's `ir_dir` field. Every existing entry reads `ir/<name>` (written on macOS/
+Linux); this run wrote `ir\gemma-4-e2b-it-int4` — `WindowsPath.__str__` uses `\`, which is not
+a path separator on POSIX, so the committed manifest would have parsed as one literal
+directory named `ir\gemma-4-e2b-it-int4` on the baseline machine. Switched to `.as_posix()`,
+added `test_manifest_ir_dir_is_always_forward_slashed` as a regression, hand-corrected the
+already-written gemma-4 entry to match.
+
+**Still open, not fixed:** the manifest's `ir_sha256` for gemma-4-e2b-it is `""`. `write_manifest`
+hashes `ir_dir / "openvino_model.bin"` (`models/registry.py:IR_BIN_NAME`), which the VLM export
+doesn't produce — it writes `openvino_language_model.bin` instead. Same root cause as the
+`is_converted`/warm-stage gap BLOCKERS #16 already named; fingerprinting multi-part IR needs a
+decision about which part (or a combined hash of all parts) is authoritative, which is part of
+the VLMPipeline wiring, not a one-line fix alongside it.
+
+Verified: ruff clean, `uv run pytest -q` exit 0, `uv lock --check` clean.
+
+Next: VLMPipeline wiring in `answer/generate.py:load_generator` + multi-part-aware
+`is_converted`/`ir_sha256` in `models/registry.py` — proceeding in an isolated worktree per the
+developer, concurrently with the INT8 conversion running in this tree.

@@ -51,6 +51,16 @@
       "ov_version": "2026.3.0",
       "converted_at": "2026-08-24T15:38:44Z"
     },
+    "gemma-4-e2b-it": {
+      "role": "generator",
+      "hf_id": "google/gemma-4-E2B-it",
+      "hf_revision": "3e22461f65e89153144f8adb70e3b8c2cc9845a7",
+      "precision": "int4",
+      "ir_dir": "ir/gemma-4-e2b-it-int4",
+      "ir_sha256": "",
+      "ov_version": "2026.3.0",
+      "converted_at": "2026-08-25T13:43:50Z"
+    },
     "latin_PP-OCRv5_mobile_rec": {
       "role": "ocr_rec_latn",
       "hf_id": "PaddlePaddle/latin_PP-OCRv5_mobile_rec",

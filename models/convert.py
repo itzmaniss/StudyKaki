@@ -647,12 +647,17 @@ def convert(
 
 
 def _relative_to_manifest(ir_dir: Path, manifest_path: Path = MANIFEST_PATH) -> str:
-    """Manifest paths are relative to the manifest file, so the tree can be relocated."""
+    """Manifest paths are relative to the manifest file, so the tree can be relocated.
+
+    `.as_posix()`, not `str()` — the manifest is committed to git and read cross-platform
+    (§7.3), and `WindowsPath.__str__` emits `\\` separators that are not path separators on
+    the machines this file also has to load on.
+    """
     base = manifest_path.resolve().parent
     try:
-        return str(ir_dir.resolve().relative_to(base))
+        return ir_dir.resolve().relative_to(base).as_posix()
     except ValueError:
-        return str(ir_dir.resolve())
+        return ir_dir.resolve().as_posix()
 
 
 def write_manifest(
