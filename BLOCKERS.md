@@ -1249,3 +1249,39 @@ blind spot as #15, one layer deeper.
    biting hardest on Tamil's ~1.1 chars/token (12 of 54 questions were trimmed), or because
    Qwen3-4B INT4 is simply weak in Tamil. **#16's Gemma 4 experiment is the test for the
    second half of that**, and it is blocked on x86 hardware, not on a decision.
+
+---
+
+## 18. This machine's top score for the golden English smoke question sits just under tau
+
+Found 2026-08-25, running step 3 of the gemma-4 continuation plan (real generator, pinned
+index, `"Who formalised boolean algebra?"`) on the Intel Windows laptop. The plan expected a
+cited English answer; this machine abstains instead:
+
+```
+top 0.445, tau 0.45 -> abstained. Same 0.445 across two repeated runs (deterministic, not jitter).
+```
+
+Step 2 first confirmed the index's embedder fingerprint is bit-identical to config
+(`OK BAAI/bge-m3 c3ea306efeb5 2026.3.0` — same `ir_sha256` as the manifest, so this is not a
+stale or rebuilt index). The corpus and index are the ones carried over, unmodified.
+
+**Most likely cause, not confirmed:** int8-quantized kernel execution differs slightly by CPU
+microarchitecture (AVX512 vs AVX2 reduction order, etc.), even from a byte-identical IR. This
+machine's `bge-m3` embedder fell back to CPU (`model.device_unavailable requested=GPU
+available=['CPU', 'GPU.0', 'GPU.1']` — `select_device` in `models/registry.py:253` requires an
+exact string match and this machine enumerates two indexed GPUs rather than the target's single
+`Iris Xe`, so `"GPU" != "GPU.0"` and it never matches on this hardware regardless of driver
+health). If the index was built or last queried on a machine where the embedder ran on GPU or a
+different CPU, a few thousandths of cosine similarity drifting across a `tau = 0.45` cutoff set
+from one baseline machine is exactly what an unlucky borderline question looks like.
+
+**Not tuned around:** moving `tau` on the strength of one question on one machine is guessing,
+which CLAUDE.md rule 4 rules out. `configs/base.yaml`'s `tau: 0.45` is presumably backed by the
+V1 eval sweep on the baseline machine — that number stays authoritative until there's a reason
+tied to a real eval run, not a single smoke query, to revisit it.
+
+**Need a decision:** is cross-machine embedding-score drift near `tau` expected and tolerable
+(then this is just a note, not a defect), or does it call for a numerically stable quantization
+path / a margin around `tau` / re-running the eval sweep on this machine before trusting any
+number from it? Blocked file: none — this is a finding, not a code change waiting on approval.

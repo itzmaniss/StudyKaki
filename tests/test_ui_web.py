@@ -110,7 +110,7 @@ def sse_done(body: str) -> dict:
 
 def test_the_page_loads_no_remote_asset():
     """A CDN font or script would be a runtime network call, which §0.3 forbids."""
-    html = PAGE.read_text()
+    html = PAGE.read_text(encoding="utf-8")
     for scheme in ("https://", "//fonts.", "cdn.", "unpkg", "jsdelivr"):
         assert scheme not in html, f"page references {scheme!r}"
 
@@ -122,7 +122,7 @@ def test_the_server_module_imports_no_web_framework():
     """
     import ast
 
-    tree = ast.parse(Path("ui/web.py").read_text())
+    tree = ast.parse(Path("ui/web.py").read_text(encoding="utf-8"))
     imported = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):

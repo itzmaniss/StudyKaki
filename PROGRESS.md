@@ -419,3 +419,34 @@ Verified: ruff clean, `uv lock --check` clean, `uv run pytest` -> 835 passed, 8 
 
 Next: #17 lists the four candidate fixes in order; the fourth is #16's Gemma 4 experiment,
 which needs the Intel laptop.
+
+## 2026-08-25 21:14 — eval/run.py, eval/bench.py, tests/test_ui_web.py: Windows portability
+
+On the Intel Windows laptop for #16. Before touching Gemma 4, ran the continuation plan's
+steps 2–3 (index fingerprint check, full suite, real-generator UI sanity check) — the suite
+broke immediately. This codebase had never run on Windows before.
+
+Done:
+- `eval/run.py` and `eval/bench.py` both did `import resource` unconditionally; `resource` is
+  POSIX-only, so 4 test modules failed to collect. Consolidated peak-RSS reading into
+  `eval.bench.peak_rss_bytes()` (which already had the darwin-vs-linux `ru_maxrss` unit fix)
+  with a Windows branch via `GetProcessMemoryInfo`; `eval.run` now imports it instead of
+  duplicating the logic. First attempt silently returned 0 — ctypes truncates
+  `GetCurrentProcess()`'s pseudo-handle without explicit `argtypes`/`restype`, so the call
+  failed `ERROR_INVALID_HANDLE` and was swallowed. Fixed by typing the call explicitly.
+- `zoneinfo.ZoneInfo("UTC")` raised `ZoneInfoNotFoundError` inside polars' parquet round-trip —
+  Windows ships no IANA tz database. Added `tzdata` as a Windows-only marker dependency via
+  `uv add`, so `uv.lock` changed only as that command's side effect (CLAUDE.md rule 5).
+- Two `Path.read_text()` calls (`eval/run.py:load_golden`, `tests/test_ui_web.py`) relied on
+  the platform default encoding — cp1252 on Windows — and crashed on the em-dashes in
+  `eval/golden.jsonl` and `ui/web.py`. Pinned both to `encoding="utf-8"`.
+
+Verified: `uv run ruff format .` and `ruff check --fix .` clean, `uv run pytest -q` exit 0 with
+the same 8 skipped as the last non-Windows run (no count regression), `uv lock --check` clean.
+
+Also ran steps 2–3 for real: step 2 confirmed the carried-over index's embedder fingerprint
+still matches (`OK BAAI/bge-m3 c3ea306efeb5 2026.3.0`). Step 3's UI query came back an
+abstention, not the cited answer the plan expected — recorded as a new item in BLOCKERS.md
+rather than tuned around, since it's a one-sample borderline score.
+
+Next: #16 (Gemma 4 download + INT4 convert) — running separately on this machine already.

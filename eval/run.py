@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import json
 import random
-import resource
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,6 +22,7 @@ import structlog
 
 from core.config import Config, load_config
 from core.schema import Chunk, Retrieved
+from eval.bench import peak_rss_bytes
 from eval.metrics import GoldQuestion, groundedness, mean, recall_at, reciprocal_rank
 from retrieve.retriever import Retriever, abstains_for
 
@@ -88,7 +88,7 @@ def load_golden(path: Path = GOLDEN) -> list[GoldQuestion]:
             f"{path} not found — §5 requires 40-60 golden questions before numbers mean anything"
         )
     out: list[GoldQuestion] = []
-    for lineno, line in enumerate(path.read_text().splitlines(), start=1):
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         line = line.strip()
         if not line or line.startswith("#"):
             continue
@@ -128,7 +128,7 @@ def evaluate(
                 question=n,
                 of=len(golden),
                 lang=gold.lang,
-                peak_rss_gb=round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e9, 2),
+                peak_rss_gb=round(peak_rss_bytes() / 1e9, 2),
             )
         hits = retriever.retrieve(gold.q, k)
         abstained = abstains_for(hits, tau, retriever)

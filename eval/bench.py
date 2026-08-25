@@ -13,8 +13,9 @@ dishonest (BLOCKERS.md #1).
 from __future__ import annotations
 
 import argparse
+import ctypes
+import ctypes.wintypes
 import platform
-import resource
 import sys
 import time
 from dataclasses import dataclass
@@ -89,7 +90,47 @@ def _ru_maxrss_to_bytes(ru_maxrss: int, platform_name: str) -> int:
     return int(ru_maxrss) if platform_name == "darwin" else int(ru_maxrss) * 1024
 
 
+class _ProcessMemoryCounters(ctypes.Structure):
+    """Mirrors Windows' `PROCESS_MEMORY_COUNTERS` — the `resource` module doesn't exist here."""
+
+    _fields_ = [
+        ("cb", ctypes.wintypes.DWORD),
+        ("PageFaultCount", ctypes.wintypes.DWORD),
+        ("PeakWorkingSetSize", ctypes.c_size_t),
+        ("WorkingSetSize", ctypes.c_size_t),
+        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+        ("PagefileUsage", ctypes.c_size_t),
+        ("PeakPagefileUsage", ctypes.c_size_t),
+    ]
+
+
+def _peak_rss_bytes_windows() -> int:
+    # Untyped, GetCurrentProcess()'s pseudo-handle (-1) truncates under ctypes' default
+    # c_int marshalling and GetProcessMemoryInfo then fails with ERROR_INVALID_HANDLE.
+    kernel32 = ctypes.windll.kernel32
+    psapi = ctypes.windll.psapi
+    kernel32.GetCurrentProcess.restype = ctypes.wintypes.HANDLE
+    psapi.GetProcessMemoryInfo.argtypes = [
+        ctypes.wintypes.HANDLE,
+        ctypes.POINTER(_ProcessMemoryCounters),
+        ctypes.wintypes.DWORD,
+    ]
+    psapi.GetProcessMemoryInfo.restype = ctypes.wintypes.BOOL
+
+    info = _ProcessMemoryCounters()
+    info.cb = ctypes.sizeof(_ProcessMemoryCounters)
+    ok = psapi.GetProcessMemoryInfo(kernel32.GetCurrentProcess(), ctypes.byref(info), info.cb)
+    return info.PeakWorkingSetSize if ok else 0
+
+
 def peak_rss_bytes() -> int:
+    if sys.platform == "win32":
+        return _peak_rss_bytes_windows()
+    import resource
+
     return _ru_maxrss_to_bytes(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, sys.platform)
 
 
