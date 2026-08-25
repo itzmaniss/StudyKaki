@@ -12,17 +12,21 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import resource
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import polars as pl
+import structlog
 
 from core.config import Config, load_config
 from core.schema import Chunk, Retrieved
 from eval.metrics import GoldQuestion, groundedness, mean, recall_at, reciprocal_rank
 from retrieve.retriever import Retriever, abstains_for
+
+log = structlog.get_logger("eval.run")
 
 GOLDEN = Path(__file__).resolve().parent / "golden.jsonl"
 
@@ -115,7 +119,17 @@ def evaluate(
     tau = cfg.retrieve.tau
     rows = []
 
-    for gold in golden:
+    for n, gold in enumerate(golden, start=1):
+        # §5 tracks peak RSS, and a generative sweep is where it actually bites: a run that
+        # dies without a traceback leaves this as the only evidence of why.
+        if n % 5 == 0 or n == 1:
+            log.info(
+                "eval.progress",
+                question=n,
+                of=len(golden),
+                lang=gold.lang,
+                peak_rss_gb=round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e9, 2),
+            )
         hits = retriever.retrieve(gold.q, k)
         abstained = abstains_for(hits, tau, retriever)
         grounded = _groundedness_of(gold.q, hits, cfg, generator)
