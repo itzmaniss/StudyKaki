@@ -28,5 +28,12 @@ models/ir/
 .claude-flow/
 .swarm/
 
+# Browser scratch, and lfs hook stubs a stray --hooks-path wrote as real files
+.playwright-mcp/
+dev/
+
+# Local archives
+*.zip
+
 # macOS
 .DS_Store
