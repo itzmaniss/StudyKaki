@@ -1339,6 +1339,29 @@ blind spot as #15, one layer deeper.
 
 ---
 
+**Does not reproduce — 2026-08-27, full sweep on the Core Ultra 7 255H box.** Running
+`eval/run.py --retriever dense --groundedness` over all 54 golden questions against the same
+pinned index, `qwen3-4b-instruct-int4` scores:
+
+| lang | n | scored | model abstentions | groundedness | answer_lang_match |
+|---|---|---|---|---|---|
+| en | 37 | 31 | 4 | 0.935 | 1.000 |
+| ta | 6 | 5 | 1 | **1.000** | 1.000 |
+| zh | 11 | 10 | 1 | 0.900 | 1.000 |
+
+Tamil is not broken on this machine: 5 of 6 scored, groundedness 1.000, every answer in the
+asking script, one model abstention. The `ta 0.000` this entry was written around is not
+reproducible here, and neither is the "abstains 2/2" live result — the same two questions now
+answer correctly and cited. Note `generate.temperature: 0.2` with `do_sample=True` makes every
+one of these runs a sample, not a measurement, so the original two-question observation was
+always thin evidence. It is also a different machine (see #18 and #20).
+
+**Consequence for #16.** The Gemma 4 experiment existed to test the second half of need 4
+("or because Qwen3-4B INT4 is simply weak in Tamil"). Answered: it is not. Gemma 4 was
+evaluated anyway, on the same sweep, and loses on quality — see PROGRESS 2026-08-27 for the
+side-by-side. Needs 1 and 2 of this entry are built and committed (edac148, fe60873); need 3
+(localising `ABSTAIN_MESSAGE` / `TIER3_DISCLAIMER`) is still an open decision.
+
 ## 18. This machine's top score for the golden English smoke question sits just under tau
 
 Found 2026-08-25, running step 3 of the gemma-4 continuation plan (real generator, pinned
@@ -1423,3 +1446,173 @@ evidence artefact for Intel tech usage, so its shape is architecture-adjacent.
 
 Blocked file: none. `models/convert.py:write_manifest`, `models/registry.py` are where the
 change would land.
+
+---
+
+## 20. The NPU loads the Gemma 4 VLM and silently generates garbage
+
+Found 2026-08-27 on the Core Ultra 7 255H box, after a request to move generation to the NPU.
+`openvino` enumerates all three devices here:
+
+```
+CPU -> Intel(R) Core(TM) Ultra 7 255H
+GPU -> Intel(R) Arc(TM) 140T GPU (32GB) (iGPU)
+NPU -> Intel(R) AI Boost
+```
+
+Same IR, same prompt, same `GenerationSettings(max_new_tokens=48, temperature=0.0)`, only
+`models.generator.device` differs:
+
+```
+CPU  12.6s  "Photosynthesis is the process by which plants convert light energy, water, and
+            carbon dioxide into chemical energy in the form of glucose (sugar) and oxygen."
+NPU  34.2s  Photos") <BN> a ** [ A "(( HS nor`ANDE^{- _{\<TH>虫_ Artwork for C$ servicesill terb...
+```
+
+The NPU emits the correct first token and then degenerates. Load takes 152.9s against CPU's
+~37s, so it is slower on both axes as well as wrong.
+
+**Why this is worse than a plain incompatibility.** §7.4's device fallback is triggered by a
+load *failure*, and this load succeeds — `generator.loaded device=NPU fell_back=False`. Nothing
+downstream inspects output sanity, so `device: NPU` in a config would have produced 54 rows of
+confident nonsense in `eval/run.py` with every metric computed over it. `groundedness` would not
+even catch it: token salad emits no `[n]` markers, so it scores 0.0 the same way a legitimately
+uncited answer does.
+
+Not investigated further: this is very likely the multi-part `hf_vlm` IR (static shapes / KV
+cache on the NPU plugin) rather than anything about Gemma 4's weights. `qwen3-4b-instruct`
+(single-file `LLMPipeline`) has **not** been tried on NPU and might well be fine.
+
+**Need a decision.** The cheap, honest options:
+
+1. **Refuse NPU for `is_vlm` entries** in `answer/generate.py:load_generator` — raise, or log
+   loudly and fall back to CPU, rather than returning a pipeline that produces garbage.
+2. **A generation smoke check at load**, for any device: one short fixed prompt, assert the
+   output is mostly in the expected script. Catches this class generally rather than
+   special-casing NPU, but costs a few seconds on every load and needs a threshold that will
+   not misfire.
+3. **Leave it, document it.** `configs/*.yaml` all say `device: CPU` for the generator, so
+   nothing ships broken today.
+
+Recommend 1 — it is targeted, cheap, and the blast radius of the alternative is a study tool
+answering in token salad. Not done unilaterally: it hardcodes a device/kind policy that §6 says
+belongs in config, and §7.4 currently defines fallback as load-failure-only.
+
+Blocked file: none. `answer/generate.py:load_generator` is where it would land.
+
+---
+
+## 21. Gemma 4 ignores the same-language rule on cross-lingual questions; a reminder fixes it
+
+Found 2026-08-27 by the `answer_lang_match` column added for #17, on its first real sweep.
+`gemma-4-e2b-it-int4` answers in the language of the *retrieved document* rather than the
+language of the question:
+
+| English questions | n | answered in the wrong script |
+|---|---|---|
+| cross-lingual (English question -> Chinese/Tamil source) | 12 | **9** |
+| monolingual | 25 | 1 |
+
+`SYSTEM_INSTRUCTION` rule 1 already forbids exactly this ("Write your answer in the same
+language as the question, regardless of the language of the context"). `qwen3-4b-instruct`
+scores `answer_lang_match 1.000` on all three languages with that identical prompt, so the
+wording is sufficient and this is Gemma instruction-following, not a prompt defect.
+
+**It is nonetheless prompt-fixable.** A/B over the 12 cross-lingual questions, same generator,
+same retrieval, only the system prompt differing:
+
+```
+A baseline                              lang_match  3/12   grounded 9/11   mean 15.2s
+B baseline + "(Answer in English.)"     lang_match 12/12   grounded 9/10   mean  2.6s
+  placed after the context, before "Answer:"
+C rule 1 names the language + reminder  lang_match 11/12   grounded 9/10   mean 14.3s
+```
+
+B is not winning by being terse — its median answer is the *longest* of the three (125 chars
+against A's 41), and it is strictly more informative: A returned
+`截至2021年12月，我国网民规模达10.32亿[3]` where B returned the same figure plus the
+year-on-year increase and the penetration rate, in English, citing the same block.
+
+**A second, unexplained finding inside that.** The speedup is real and is not an artifact of
+output length. Holding prompt size constant (~1950 tokens, the reminder adds 6) and output
+length constant, answering in Chinese runs ~5x slower per token than answering in English:
+
+```
+A (Chinese out)  24 tok  10.9s   2.2 tok/s      A  22 tok  8.0s   2.8 tok/s
+B (English out)  71 tok   3.4s  20.8 tok/s      B  22 tok  1.5s  14.8 tok/s
+```
+
+Identical token counts in the second pair. No explanation offered — it could be the CJK
+detokenizer path in this GenAI build, and it has not been investigated. It does mean part of
+Gemma's measured 23.0s median generate time is this bug rather than the model.
+
+**Not applied.** The one-line change is `answer/prompt.py:build_prompt`, inserting a
+language reminder between the context and `Answer:`. Held back because: it changes a contract
+shared by both generators and would break comparability with every existing eval run, and it
+fixes the model the sweep says not to ship. If Gemma 4 is ever chosen, apply it — the
+before/after number (3/12 -> 12/12) already exists, which is what §0.5 asks for.
+
+**Need a decision:** apply the reminder to the shared prompt now (and re-baseline), or leave
+it recorded here until a generator change makes it matter.
+
+---
+
+## 22. Two registry tests go red on hardware where the iGPU actually works
+
+Found 2026-08-27. `uv run pytest -q` is green on the machine BLOCKERS #18 describes and red on
+this one (Core Ultra 7 255H / Arc 140T). Verified pre-existing: both fail identically with
+`models/registry.py` checked out at 5131743, i.e. before any change in this session.
+
+```
+FAILED tests/test_registry.py::test_load_falls_back_to_cpu_and_reports_the_device_it_got
+FAILED tests/test_registry.py::test_loaded_model_is_actually_usable
+```
+
+**Both stem from one thing: `"GPU"` and `"GPU.0"` are different strings for the same device.**
+
+`_compile_with_fallback` compiles with the config's `"GPU"`, then `_execution_device` reads the
+compiled model's `EXECUTION_DEVICES` property, which reports `"GPU.0"`. Two consequences:
+
+1. `fell_back = actual != requested` compares an execution-device name against a config name,
+   so a *successful* GPU load is logged as a fallback:
+   `model.loaded device=GPU.0 fell_back=True requested_device=GPU`. That is simply wrong, and
+   §7.4 exists precisely so this line can be trusted.
+2. `test_load_falls_back_to_cpu_and_reports_the_device_it_got:314` asserts
+   `loaded.device in set(ov.Core().available_devices)`. `available_devices` is
+   `['CPU', 'GPU', 'NPU']` here; `loaded.device` is `"GPU.0"`. The assertion assumes both come
+   from one vocabulary. They do not.
+
+This is the same root cause as #18's `select_device` exact-match note, seen from the other end:
+there `"GPU" != "GPU.0"` meant the GPU was never *selected*; here it means a selected GPU is
+never *recognised*.
+
+**The second failure is separate and needs its own answer.** `test_loaded_model_is_actually_usable`
+feeds `bge-m3` a bare `{"input_ids": [[1,2,3]]}` with no `attention_mask`. On CPU that works; on
+the Arc iGPU it raises:
+
+```
+Incompatible MatMul matrix dimension. First input dimension=1 at COL_INDEX_DIM=1
+doesn't match the second input dimension=1024 at ROW_INDEX_DIM=0
+```
+
+**bge-m3 on GPU is not broken in the real pipeline** — both sweeps today ran the embedder on
+GPU.0 and produced retrieval identical to the V1 baseline (recall@5 0.898, fingerprint
+verified). So this is the *test's* hand-built single-input call, which the GPU plugin does not
+tolerate and CPU does. Whether the fix is to pass `attention_mask` in the test or to treat a
+partial input dict as unsupported is a real question, not a typo.
+
+**Need a decision on both:**
+
+1. Should `LoadedModel.device` be the config-vocabulary device we compiled with, or the true
+   execution device? `fell_back` needs the former to be correct; §7.4's "log which one it got"
+   reads like it wants the latter. Cheapest correct answer is probably to keep both — compile
+   device for `fell_back`, execution device for telemetry — but that changes a dataclass the
+   traces already record.
+2. Should `test_loaded_model_is_actually_usable` pass a complete input (`attention_mask`
+   included), matching what `ingest/embed.py` actually sends?
+
+Not fixed unilaterally: (1) is device-fallback semantics, which §7.4 defines and #18 already has
+open, and guessing here would paper over the same ambiguity in a second place.
+
+Blocked file: `models/registry.py:_compile_with_fallback` / `_execution_device`,
+`tests/test_registry.py:314,326`.

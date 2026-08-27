@@ -680,3 +680,40 @@ Found while trying to register the already-built int4 IR; that attempt also surf
 (the manifest is keyed on model name, so it cannot hold two precisions of one checkpoint).
 Verified: uv run pytest -q exit 0, ruff clean, uv lock --check clean. 2 new tests.
 Commit: f241b40
+
+## 2026-08-27 19:34 — eval/run.py: the full V1-comparable sweep, both generators
+Done: `--groundedness` sweep over all 54 golden questions against the pinned index, once per
+generator, on the Core Ultra 7 255H box. Retrieval is byte-identical across both runs
+(recall@1 0.633, recall@5 0.898, recall@10 0.980, MRR@10 0.743), so the generator is the only
+variable.
+
+```
+                     overall   en                        ta                        zh
+qwen3-4b-instruct    0.935     0.935  match 1.000  (31)  1.000  match 1.000  (5)   0.900  (10)
+gemma-4-e2b-it       0.781     0.734  match 0.688  (32)  0.667  match 1.000  (6)   1.000  (10)
+```
+
+**Qwen3-4B wins on quality, Tamil included (1.000 vs 0.667).** Gemma 4 leads only on Chinese
+groundedness and on speed (median generate 23.0s against Qwen3's ~50s). BLOCKERS #17's premise
+does not reproduce: Qwen3's Tamil is healthy here, so the experiment that motivated the whole
+Gemma 4 branch was chasing a number that is not present on this machine.
+Runs: data/eval/runs/20260825T171843Z_dense.parquet (gemma int4),
+data/eval/runs/20260827T113413Z_dense.parquet (qwen3 int4).
+Next: nothing pending on #16/#17 except need 3 (localising the two fixed English strings).
+
+## 2026-08-27 19:40 — gemma-4-e2b-it on NPU: loads, generates garbage (BLOCKERS #20)
+Done: this box has an NPU (Intel AI Boost, Core Ultra 7 255H / Arc 140T). The VLM loads on it
+with `fell_back=False` and then emits token salad — same IR, same prompt, same settings, CPU
+answers correctly in 12.6s and NPU produces `Photos") ... nor`ANDE^{-` in 34.2s. §7.4's fallback
+only fires on load failure, so `device: NPU` would have produced 54 rows of confident nonsense
+with every metric computed over it. Recorded as #20 with a recommended guard; not applied, since
+it hardcodes a device/kind policy §6 says belongs in config.
+
+## 2026-08-27 19:52 — is Gemma's cross-lingual language switching a prompt issue? (BLOCKERS #21)
+Done: A/B over the 12 English cross-lingual questions. Baseline 3/12 answered in the asking
+language; adding `(Answer in English.)` after the context and before `Answer:` gives 12/12, with
+longer and more informative answers, not terser ones. Qwen3 already scores 1.000 on the
+unmodified prompt, so the prompt wording is sufficient and this is Gemma instruction-following.
+Not applied to the shared prompt — it would break comparability with every existing run and it
+fixes the model the sweep says not to ship. Patch and before/after recorded in #21.
+Verified: uv run pytest -q exit 0, ruff clean, uv lock --check clean.
