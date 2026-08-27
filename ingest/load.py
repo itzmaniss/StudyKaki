@@ -2,15 +2,12 @@
 
 `bytes -> Document + native text layer (+ page images on demand)`.
 
-**If the PDF has a text layer, extract it here and set `has_text_layer=True` so OCR is
-skipped entirely.** §3 calls that the biggest single speedup available: a 200-page born-digital
-textbook goes from minutes of PaddleOCR to under a second of pymupdf.
+A text layer sets `has_text_layer=True` and skips OCR entirely — §3's biggest single
+speedup: a 200-page born-digital textbook goes from minutes of PaddleOCR to under a second
+of pymupdf. Those blocks carry `ocr_confidence=None`, the schema's "not OCR'd".
 
-Text-layer blocks carry `ocr_confidence=None` — the schema uses that to mean "not OCR'd".
-
-Reading order is a global monotonic counter across the whole document, assigned top-to-bottom
-then left-to-right within each page. Multi-column layout detection is not attempted; that is
-layout analysis, and it belongs to the OCR stage if it is ever needed.
+Reading order is a global counter, top-to-bottom then left-to-right per page. Multi-column
+detection is not attempted; that is layout analysis and belongs to the OCR stage.
 """
 
 from __future__ import annotations
@@ -37,27 +34,25 @@ PIPELINE_VERSION = "v1"
 PDF_MAGIC = b"%PDF"
 PDF_MIME = "application/pdf"
 
-# A born-digital page carries far more than this; a scan with a stray page number carries far
-# less. Anything in between is ambiguous and gets OCR'd, which is the safe direction to err.
+# Born-digital pages carry far more, a scan with a stray page number far less. In between
+# is ambiguous and gets OCR'd — the safe direction to err.
 TEXT_LAYER_MIN_CHARS_PER_PAGE = 50
 
-# Presence of a text layer is not the same as usefulness of one. Legacy 8-bit Indic font
-# encodings (TSCII/TAB/Bamini) and CP1252-reinterpreted bytes put correct glyphs on the page
-# while `get_text` returns Latin-1 noise: a Tamil textbook reads as Tamil and extracts as
-# "ªêŒ¶ð£˜". Trusting presence alone skips OCR, detects the script as `latn`, tokenises on
-# whitespace, embeds garbage, and returns confident nonsense — with nothing raising anywhere.
-# So the layer must decode to a *plausible* script before we trust it. See BLOCKERS.md #5.
+# A text layer's presence is not its usefulness. Legacy 8-bit Indic encodings (TSCII/TAB/
+# Bamini) put correct glyphs on the page while `get_text` returns Latin-1 noise — a Tamil
+# textbook extracts as "ªêŒ¶ð£˜". Trusting presence skips OCR, detects `latn`, embeds
+# garbage, and returns confident nonsense with nothing raising. So the layer must decode to
+# a plausible script first. BLOCKERS.md #5.
 LEGACY_ENCODING_MAX_RATIO = 0.25
 
-# A partially-decoded layer keeps real codepoints for some glyphs and drops to Latin for the
-# rest, fusing them inside single words. Measured at 0.288 on a legacy Tamil scan whose text
-# is half-mangled; hand-built Tamil with genuine English technical terms measures 0.0. The
-# control sample is small, so this sits well clear of both rather than splitting the difference.
+# A partly-decoded layer fuses Latin fall-through inside real words. Measured 0.288 on a
+# half-mangled Tamil scan; clean Tamil with English technical terms measures 0.0. Small
+# control sample, so this sits clear of both rather than splitting the difference.
 MIXED_SCRIPT_TOKEN_MAX_RATIO = 0.15
 
-# Codepoints a real script never needs at high density, but which dominate mis-decoded 8-bit
-# text: Latin-1 Supplement, the CP1252 holes (Œ œ Š ž Ÿ), spacing modifiers, and smart
-# punctuation. Accented Latin prose uses these at a few percent, never at a quarter of the page.
+# Codepoints that dominate mis-decoded 8-bit text: Latin-1 Supplement, the CP1252 holes
+# (Œ œ Š ž Ÿ), spacing modifiers, smart punctuation. Accented Latin prose uses these at a
+# few percent, never a quarter of the page.
 _LEGACY_SUSPECT_RANGES: tuple[tuple[int, int], ...] = (
     (0x00A0, 0x00FF),
     (0x0152, 0x0178),
@@ -66,11 +61,10 @@ _LEGACY_SUSPECT_RANGES: tuple[tuple[int, int], ...] = (
     (0x2020, 0x2026),
 )
 
-# Scripts with their own Unicode block. Their presence proves the layer really decoded, so it
-# is trusted outright. Listed explicitly rather than as a floor: mis-decoded CP1252 emits
-# smart punctuation and symbols (™ U+2122, › U+203A) that sit *above* any sane floor, so a
-# floor test would read mojibake as proof of a real script — which is exactly backwards.
-# Greek and Cyrillic are deliberately absent; they sit near Latin and the ratio test covers them.
+# Scripts with their own Unicode block — their presence proves the layer decoded. Listed
+# explicitly, not as a floor: mis-decoded CP1252 emits symbols (™ U+2122, › U+203A) above
+# any sane floor, so a floor test would read mojibake as proof of a real script. Greek and
+# Cyrillic are absent on purpose; they sit near Latin and the ratio test covers them.
 _REAL_SCRIPT_RANGES: tuple[tuple[int, int], ...] = (
     (0x0590, 0x05FF),  # Hebrew
     (0x0600, 0x06FF),  # Arabic
@@ -92,16 +86,14 @@ _REAL_SCRIPT_RANGES: tuple[tuple[int, int], ...] = (
     (0xF900, 0xFAFF),  # CJK Compatibility Ideographs
 )
 
-# Scripts that separate words with spaces, so "is this token fused?" is a meaningful question.
-# CJK, kana, Hangul and Thai are excluded: they are not space-delimited, so an ordinary line
-# such as "IPv6 部署" is one token and would read as fused when nothing is wrong with it.
+# Space-delimited scripts only, so "is this token fused?" means something. CJK, kana,
+# Hangul and Thai are excluded: "IPv6 部署" is one token and would read as fused.
 _SPACE_DELIMITED_SCRIPT_RANGES: tuple[tuple[int, int], ...] = tuple(
     r for r in _REAL_SCRIPT_RANGES if r[0] < 0x0E00 or r == (0x1100, 0x11FF)
 )
 
-# Blocks are ordered top-to-bottom; y0 is quantised so that two blocks whose tops differ by
-# less than a line's leading are treated as the same row and ordered left-to-right. bboxes are
-# already normalised at this point, so the band is expressed as a fraction of page height.
+# y0 quantised so blocks within a line's leading count as one row and sort left-to-right.
+# bboxes are normalised by now, so the band is a fraction of page height.
 _ROW_BAND_PT = 5.0
 
 _HEADING_MAX_CHARS = 120
@@ -174,10 +166,9 @@ def _open(data: bytes) -> pymupdf.Document:
 def _normalise_bbox(rect: pymupdf.Rect, page: pymupdf.Page) -> BBox:
     """Text coordinates into the 0-1 space of the page *as displayed*.
 
-    `get_text` reports coordinates in unrotated page space while `page.rect` is the rotated
-    rect, so on a `/Rotate 180` page the two disagree and an uncorrected bbox highlights the
-    opposite corner — a citation pointing at the wrong part of the page. `rotation_matrix`
-    maps one into the other and is the identity when the page is upright.
+    `get_text` reports unrotated page space, `page.rect` is the rotated rect, so on a
+    `/Rotate 180` page a raw bbox highlights the opposite corner. `rotation_matrix` maps
+    between them and is the identity when the page is upright.
     """
     page_rect = page.rect
     placed = rect * page.rotation_matrix
@@ -269,8 +260,8 @@ def _row_band(page_rect: pymupdf.Rect) -> float:
 def _extract_blocks(doc: pymupdf.Document, doc_id: str) -> list[Block]:
     """Two passes: collect typography doc-wide, then classify against the body font size.
 
-    Only lightweight candidates are retained between passes — the raw pymupdf dicts for a
-    200-page book are tens of megabytes and none of it is needed after the first pass.
+    Only light candidates survive between passes — raw pymupdf dicts for a 200-page book
+    are tens of megabytes.
     """
     weights: dict[float, int] = {}
     candidates: list[tuple[_Candidate, bool]] = []
@@ -335,15 +326,11 @@ def _is_space_delimited_script(ch: str) -> bool:
 def mixed_script_token_ratio(text: str) -> float:
     """Fraction of script-bearing tokens that also contain ASCII letters.
 
-    A word is written in one script. Latin letters *inside* a Tamil word — `எzகள}` — are a
-    font-mapping failure, whereas genuine code-switching gives the English word its own token.
-    This catches the layer that decoded *partially*: real codepoints for some glyphs, Latin
-    fall-through for the rest, which `legacy_encoding_ratio` waves through because real script
-    is present.
+    Latin letters *inside* a Tamil word — `எzகள}` — are a font-mapping failure; genuine
+    code-switching gives the English word its own token. Catches the partly-decoded layer
+    that `legacy_encoding_ratio` waves through because real script is present.
 
-    Only space-delimited scripts are considered. CJK and Thai are not written with spaces, so
-    a line reading "IPv6 部署" is a single token by this measure and would look fused when it
-    is perfectly ordinary.
+    Space-delimited scripts only: "IPv6 部署" is one token and would look fused.
     """
     tokens = [t for t in text.split() if any(_is_space_delimited_script(c) for c in t)]
     if not tokens:
@@ -355,8 +342,8 @@ def mixed_script_token_ratio(text: str) -> float:
 def legacy_encoding_ratio(text: str) -> float:
     """Fraction of non-space characters that look like mis-decoded 8-bit text.
 
-    Returns 0.0 when the text contains any codepoint from a script with its own Unicode block,
-    because that proves the layer decoded properly and no ratio test is needed.
+    0.0 if any codepoint comes from a script with its own Unicode block — that proves the
+    layer decoded, so no ratio test is needed.
     """
     chars = [ch for ch in text if not ch.isspace()]
     if not chars:
@@ -395,8 +382,8 @@ def _has_text_layer(blocks: Sequence[Block], n_pages: int) -> bool:
 
     ratio = legacy_encoding_ratio(sample)
     if ratio > LEGACY_ENCODING_MAX_RATIO:
-        # Loud on purpose: silently OCR'ing a document whose publisher shipped a text layer is
-        # surprising, and the alternative — indexing mojibake — is worse and invisible.
+        # Loud on purpose: silently OCR'ing a document that shipped a text layer is
+        # surprising, and indexing mojibake instead is worse and invisible.
         log.warning(
             "load.text_layer_rejected",
             reason="looks like a legacy 8-bit font encoding, not Unicode",
@@ -468,7 +455,7 @@ def load_path(path: str | Path, **kw: Any) -> LoadResult:
 def render_pages(
     data: bytes, *, dpi: int = 200, pages: Sequence[int] | None = None
 ) -> Iterator[PageImage]:
-    """Page rasters for the OCR stage. Yielded lazily — a 200-page render will not fit in RAM.
+    """Page rasters for OCR, yielded lazily — a 200-page render will not fit in RAM.
 
     Not cached: images are large, and the OCR stage caches its `Block` output instead.
     """

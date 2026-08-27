@@ -1,24 +1,15 @@
 """Dense retrieval — ARCHITECTURE.md §4, §3, §3.1.
 
-    query -> verify embedder fingerprint -> embed (manifest's query_prefix)
+    query -> verify fingerprint -> embed (manifest's query_prefix)
           -> exact cosine over the memmapped flat index -> top-k -> Retrieved
 
-**Flat and exact (§3).** At student-corpus scale a full scan is fast enough and there is no
-recall to apologise for, so this file contains no ANN structure. The scan is blocked over
-the memmap so peak RSS stays bounded on an 8 GB machine rather than tracking corpus size.
+Flat exact scan, blocked over the memmap: no ANN at this scale, and peak RSS stays a
+constant rather than tracking corpus size. Norms are computed in the same pass, so an
+un-normalised index still ranks by angle.
 
-**Cosine is computed, not assumed.** Row norms come out of the same blocked pass as the dot
-products, so an index whose vectors were never L2-normalised still ranks correctly instead
-of ranking by magnitude. When the vectors *are* unit-norm the division is a no-op.
-
-**The fingerprint is checked on every query (§3.1 rule 2).** Not at load, not once per
-process — every call. An index built with a different embedder must hard-fail, because
-drift here does not look like drift: retrieval quality collapses and it reads as a chunking
-bug. `models.registry.ir_sha256` memoises on (path, size, mtime), so the check costs a small
-JSON read rather than re-hashing 544 MB of INT8 weights.
-
-Nothing here touches the network (§0.3) and nothing here decides what to *do* with a weak
-result — that is `retriever.abstains(hits, tau)`, reused rather than reimplemented.
+Fingerprint is verified on every query (§3.1 rule 2), not once per process. Embedder drift
+does not look like drift — retrieval collapses and reads as a chunking bug — so it must
+hard-fail. `ir_sha256` memoises, so the check is a JSON read.
 """
 
 from __future__ import annotations
@@ -45,8 +36,7 @@ CHUNKS_NAME = "chunks.parquet"
 VECTORS_NAME = "vectors.npy"
 INDEX_MANIFEST_NAME = "index_manifest.json"
 
-#: Rows per blocked scan. ~32 MB at dim=1024 float32 — big enough for BLAS, small enough
-#: that peak RSS is a constant rather than a function of corpus size.
+#: ~32 MB at dim=1024 float32 — big enough for BLAS, small enough to bound RSS.
 DEFAULT_BLOCK_ROWS = 8192
 
 _CHUNK_COLUMNS = frozenset(f.name for f in fields(Chunk))
@@ -66,11 +56,10 @@ class IndexCorrupt(DenseIndexError):
 
 @runtime_checkable
 class QueryEncoder(Protocol):
-    """Turns already-prefixed texts into `[n, dim]` float32.
+    """Already-prefixed texts -> `[n, dim]` float32.
 
-    The retriever never applies a prefix itself and never picks a model: it passes the
-    text the index's manifest says to pass, to the encoder it was handed. That is what
-    keeps query-time and index-time embeddings byte-identical (§3.1).
+    Prefix and model choice both come from the index manifest, never from here — that is
+    what keeps query-time and index-time embeddings identical (§3.1).
     """
 
     def __call__(self, texts: Sequence[str]) -> np.ndarray: ...
@@ -78,11 +67,9 @@ class QueryEncoder(Protocol):
 
 @dataclass(frozen=True)
 class DenseIndex:
-    """An on-disk flat index (§0.1 storage layout), opened read-only.
+    """On-disk flat index (§0.1), read-only.
 
-    Chunks stay as a polars frame and are decoded to `Chunk` only for the handful of rows
-    that make top-k. Materialising every chunk to answer one query would cost more RAM than
-    the vectors do.
+    Chunks stay a polars frame, decoded to `Chunk` only for rows that make top-k.
     """
 
     path: Path
@@ -119,7 +106,7 @@ class DenseIndex:
 def load_index(path: str | Path) -> DenseIndex:
     """Open `<index_dir>/{chunks.parquet, vectors.npy, index_manifest.json}` (§0.1).
 
-    Vectors are memmapped, so opening a 500 MB index costs no RAM until it is scanned.
+    Vectors are memmapped: opening costs no RAM until the scan.
     """
     index_dir = Path(path)
     if not index_dir.is_dir():
@@ -160,7 +147,7 @@ def load_index(path: str | Path) -> DenseIndex:
     _check_alignment(index_dir, manifest, frame, vectors)
 
     if frame.height:
-        # Fail on a malformed chunk row now, not on the query that happens to retrieve it.
+        # Fail now, not on the query that happens to retrieve the bad row.
         try:
             Chunk.from_row(frame.row(0, named=True))
         except (TypeError, ValueError) as e:
@@ -224,8 +211,7 @@ def _check_alignment(
 def default_index_dir(cfg: Config) -> Path:
     """Resolve `data/index/<index_id>/` when exactly one index exists.
 
-    Deliberately refuses to guess between several. Callers that know which index they want
-    pass the path; this is a convenience for the single-corpus case, not a registry.
+    Refuses to guess between several — callers that know pass the path.
     """
     root = cfg.resolve(cfg.paths.data_dir) / "index"
     if not root.is_dir():
@@ -251,14 +237,11 @@ def query_encoder(
     models_manifest_path: str | Path | None = None,
     embedder: TextEmbedder | None = None,
 ) -> QueryEncoder:
-    """Bind the query path to `ingest/embed.py` — the same model that built the index.
+    """Bind the query path to `ingest/embed.py` — the model that built the index.
 
-    `ingest.embed` is imported lazily: it compiles a 544 MB IR and pulls in the OpenVINO
-    tokenizer, and `retrieve/dense.py` must stay importable (and testable) without either.
-
-    Note the empty prefix. `Embedder.embed_queries` would apply the prefix from the *models*
-    manifest; `DenseRetriever` has already applied the one from the *index* manifest, which
-    is the authority (§3.1 rule 3). Prefixing here as well would double it.
+    Lazy import: `ingest.embed` compiles a 544 MB IR, and this module must stay importable
+    without it. Empty prefix on purpose — `DenseRetriever` already applied the *index*
+    manifest's prefix, which is the authority (§3.1 rule 3); prefixing again would double it.
     """
     if embedder is None:
         from ingest.embed import Embedder
@@ -273,11 +256,9 @@ def query_encoder(
 
 
 class DenseRetriever:
-    """Satisfies `retrieve.retriever.Retriever` over a flat float32 index.
+    """`retrieve.retriever.Retriever` over a flat float32 index.
 
-    `encode` is injected. In production it is the embedder from `ingest/embed.py` — the
-    same compiled model that built the index — and in tests it is a hand-made function, so
-    ranking arithmetic can be asserted exactly without a 544 MB IR on disk.
+    `encode` is injected so tests can assert ranking arithmetic without a 544 MB IR.
     """
 
     @classmethod
@@ -290,10 +271,9 @@ class DenseRetriever:
         embedder: TextEmbedder | None = None,
         block_rows: int = DEFAULT_BLOCK_ROWS,
     ) -> DenseRetriever:
-        """Production wiring: resolve the index, compile the embedder, return a retriever.
+        """Resolve the index, compile the embedder once, return a retriever.
 
-        Compiling is done once here rather than per query — a `retrieve()` that reloaded the
-        model would spend its whole budget on `compile_model`.
+        Once here, not per query: a `retrieve()` that reloaded would be all `compile_model`.
         """
         index = load_index(index_path if index_path is not None else default_index_dir(cfg))
         return cls(
@@ -330,7 +310,7 @@ class DenseRetriever:
 
         started = time.perf_counter()
 
-        # §3.1 rule 2 — every query, before anything else. Never degrade quietly.
+        # §3.1 rule 2 — every query, before anything else.
         verify_fingerprint(self.index.manifest, self.cfg, manifest_path=self.models_manifest_path)
 
         vector = self._embed_query(query)
@@ -375,11 +355,10 @@ class DenseRetriever:
 
 
 def _cosine_scores(vectors: np.ndarray, query: np.ndarray, block_rows: int) -> np.ndarray:
-    """Exact cosine over a memmap, blocked so peak RSS does not track corpus size.
+    """Exact cosine over a memmap, blocked to bound RSS.
 
-    Row norms are computed in the same pass as the dot products, so correctness does not
-    depend on the index having been normalised at build time. Zero-norm rows score 0
-    rather than NaN — a degenerate chunk must not outrank a real one.
+    Norms come from the same pass, so correctness does not depend on a normalised index.
+    Zero-norm rows score 0, not NaN — a degenerate chunk must not outrank a real one.
     """
     n = int(vectors.shape[0])
     scores = np.zeros(n, dtype=np.float32)
@@ -387,14 +366,9 @@ def _cosine_scores(vectors: np.ndarray, query: np.ndarray, block_rows: int) -> n
     if n == 0 or query_norm == 0.0:
         return scores
 
-    # errstate covers the BLAS kernel, not our arithmetic. Accelerate on Apple Silicon sets
-    # the sticky FP exception flags while processing the padding lanes at the edge of a
-    # vectorised matmul; those lanes are masked out of the result, but numpy reads the flags
-    # afterwards and reports divide-by-zero/overflow/invalid against `block @ query`. It fires
-    # on a finite, correct product of finite, unit-norm inputs — verified with no OpenVINO in
-    # the process — so it is noise on every single query, and noise that loud is where a real
-    # numerical warning goes to hide. The degenerate case this could otherwise mask is handled
-    # explicitly below: `where=denom > 0.0` leaves zero-norm rows at 0.0 rather than NaN.
+    # errstate covers the BLAS kernel, not our arithmetic: Accelerate on Apple Silicon sets
+    # the sticky FP flags on masked-out padding lanes, so numpy warns on every correct query.
+    # The case it could mask is handled below — `where=denom > 0.0` keeps zero-norm rows at 0.
     with np.errstate(divide="ignore", over="ignore", invalid="ignore", under="ignore"):
         for start in range(0, n, block_rows):
             block = np.asarray(vectors[start : start + block_rows], dtype=np.float32)
@@ -408,8 +382,7 @@ def _cosine_scores(vectors: np.ndarray, query: np.ndarray, block_rows: int) -> n
 def _top_k_rows(scores: np.ndarray, k: int) -> np.ndarray:
     """Row indices of the `k` best scores, descending, ties broken by row index.
 
-    `argpartition` is O(n) against `argsort`'s O(n log n); at k=20 over 100k chunks that is
-    the difference between a scan-bound and a sort-bound query.
+    `argpartition` is O(n) vs `argsort`'s O(n log n) — scan-bound rather than sort-bound.
     """
     n = int(scores.shape[0])
     k = min(k, n)

@@ -1,19 +1,11 @@
 """HF / Paddle checkpoint -> OpenVINO IR -> INT8/INT4, and write `models/manifest.json`.
 
-ARCHITECTURE.md §1, §3.1 (fingerprint fields), §7.3 (convert once, offline; commit the
-manifest, not the weights).
+ARCHITECTURE.md §1, §3.1, §7.3. No network: checkpoints come from the local HF cache
+(`local_files_only=True`), and `scripts/setup.py` is the only downloader (§0.3).
 
-**This module never touches the network.** It reads checkpoints from the local Hugging Face
-cache (`local_files_only=True`); `scripts/setup.py` is the only thing allowed to download
-(§0.3). Running convert on a cold cache raises with the setup command to run.
-
-Conversion goes through OpenVINO's **native PyTorch frontend** (`ov.convert_model`), not
-optimum's ONNX exporter: `optimum.exporters.onnx.model_patcher` imports private symbols
-(`_attention_scale`, `_causal_attention_mask`, ...) that torch 2.13 removed from
-`torch.onnx.symbolic_opset14`, so importing `optimum.intel` at all raises ImportError on
-this environment. The PyTorch frontend needs only pinned deps: openvino + nncf + torch.
-Stateful causal-LM export (KV cache, what `openvino_genai.LLMPipeline` requires) has no
-such workaround and is gated behind that import — see `convert_causal_lm`.
+Uses OpenVINO's PyTorch frontend, not optimum's ONNX exporter — the latter imports private
+`torch.onnx.symbolic_opset14` symbols torch 2.13 removed, so `import optimum.intel` raises
+here. Stateful causal-LM export needs optimum anyway; see `convert_causal_lm`.
 
     uv run python -m models.convert --only embedder
     uv run python -m models.convert --all
@@ -53,14 +45,12 @@ IR_ROOT = Path(__file__).resolve().parent / "ir"
 TOKENIZER_XML_NAME = "openvino_tokenizer.xml"
 DETOKENIZER_XML_NAME = "openvino_detokenizer.xml"
 
-# Paddle's PIR exporter targets ONNX; 14 covers every op PP-OCR mobile uses and keeps the
-# graph readable by OpenVINO's ONNX frontend without opset-upgrade churn.
+# Covers every op PP-OCR mobile uses, and OpenVINO's ONNX frontend reads it as-is.
 PADDLE_ONNX_OPSET = 14
 
 Kind = Literal["hf_encoder", "hf_causal_lm", "hf_vlm", "hf_reranker", "paddle"]
 
-#: Kinds whose runtime *emits* text and therefore needs a detokenizer beside the tokenizer.
-#: Encoders and rerankers only ever consume it, so they save the tokenizer alone.
+#: Kinds that emit text, so they need a detokenizer. Encoders/rerankers only consume.
 _CHAT_KINDS: frozenset[str] = frozenset({"hf_causal_lm", "hf_vlm"})
 
 
@@ -70,11 +60,10 @@ class ConversionError(RuntimeError):
 
 @dataclass(frozen=True)
 class ModelSource:
-    """Where a model in `configs/base.yaml` actually comes from.
+    """Where a model in `configs/base.yaml` comes from.
 
-    `hf_revision` is a commit SHA, never a branch — HF models are updated in place and a
-    branch name would let the weights change under a fingerprint that says they didn't
-    (§3.1 rule 1).
+    `hf_revision` is a commit SHA, never a branch: HF updates in place, and a branch would
+    let weights change under a fingerprint that says they didn't (§3.1 rule 1).
     """
 
     name: str
@@ -82,8 +71,7 @@ class ModelSource:
     kind: Kind
     hf_id: str
     hf_revision: str
-    #: Declared §3.1 fingerprint fields. Cross-checked against the checkpoint at conversion
-    #: so a model swap cannot silently change dim/pooling/max_len.
+    #: §3.1 fingerprint fields, cross-checked against the checkpoint at conversion.
     embedding: dict[str, Any] | None = None
     allow_patterns: tuple[str, ...] = ()
     ignore_patterns: tuple[str, ...] = field(default_factory=tuple)
@@ -101,8 +89,7 @@ SOURCES: dict[str, ModelSource] = {
             "pooling": "cls",
             "normalize": True,
             "max_len": 8192,
-            # BGE-M3 is symmetric and wants no prefixes; E5-family models do. The values
-            # travel with the index, not the code (§3.1 rule 3).
+            # BGE-M3 is symmetric; E5-family needs prefixes. Travels with the index (§3.1 rule 3).
             "query_prefix": "",
             "passage_prefix": "",
         },
@@ -114,8 +101,7 @@ SOURCES: dict[str, ModelSource] = {
         kind="hf_reranker",
         hf_id="BAAI/bge-reranker-v2-m3",
         hf_revision="953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
-        # No `embedding` block: a cross-encoder emits one relevance logit, not a vector, so
-        # it has no §3.1 fingerprint and cannot invalidate the index.
+        # No `embedding` block: a logit, not a vector, so no fingerprint to invalidate.
         ignore_patterns=("onnx/*", "*.onnx", "*.onnx_data", "*.msgpack", "*.h5"),
     ),
     "qwen3-4b-instruct": ModelSource(
@@ -126,22 +112,19 @@ SOURCES: dict[str, ModelSource] = {
         hf_revision="cdbee75f17c01a7cc42f958dc650907174af0554",
         ignore_patterns=("original/*", "*.gguf"),
     ),
-    # Branch experiment: a smaller generator, against BLOCKERS #14 (memory) and the Tamil
-    # generation failure. E2B is ~5B raw weights that run as ~2B effective — the per-layer
-    # embedding trick — so it converts like a 5B model and should run like a 2B one.
+    # Smaller generator, against BLOCKERS #14 (memory) and the Tamil failure. ~5B raw
+    # weights running as ~2B effective, so it converts like 5B and runs like 2B.
     "gemma-4-e2b-it": ModelSource(
         name="gemma-4-e2b-it",
         role="generator",
         kind="hf_vlm",
         hf_id="google/gemma-4-E2B-it",
         hf_revision="3e22461f65e89153144f8adb70e3b8c2cc9845a7",
-        # The checkpoint is any-to-any; this project reads text. The vision and audio towers
-        # are inside model.safetensors, so they come down with it — nothing to exclude.
+        # Vision/audio towers live inside model.safetensors — nothing to exclude.
         ignore_patterns=("*.gguf", "*.task", "*.litertlm"),
     ),
-    # configs/base.yaml names PP-OCRv6_mobile_det/rec. No such public checkpoint exists —
-    # PaddlePaddle/PP-OCRv6_* returns 401 on the HF API. v5 mobile is the newest available
-    # and is what PaddleOCR itself ships. See BLOCKERS.md.
+    # base.yaml names v6, but PaddlePaddle/PP-OCRv6_* 401s on HF — no public checkpoint.
+    # v5 mobile is the newest available and what PaddleOCR ships. See BLOCKERS.md.
     "PP-OCRv5_mobile_det": ModelSource(
         name="PP-OCRv5_mobile_det",
         role="ocr_det",
@@ -156,9 +139,8 @@ SOURCES: dict[str, ModelSource] = {
         hf_id="PaddlePaddle/PP-OCRv5_mobile_rec",
         hf_revision="682f20538d8c086cb2128e5cfac775e6c4904e85",
     ),
-    # §3: "shared detector, per-script recognition head". PP-OCRv5's default recogniser is
-    # Chinese+English and its 18385-class charset contains no Tamil at all, so a Tamil page
-    # decodes to CJK noise at high confidence. These are the dedicated heads.
+    # §3 per-script heads. v5's default charset (18385 classes, zh+en) has no Tamil, so a
+    # Tamil page decodes to CJK noise at high confidence.
     "ta_PP-OCRv5_mobile_rec": ModelSource(
         name="ta_PP-OCRv5_mobile_rec",
         role="ocr_rec_taml",
@@ -238,10 +220,9 @@ def _save(model: ov.Model, ir_dir: Path, precision: str) -> None:
 
 
 def _checked_embedding(src: ModelSource, snapshot: Path) -> dict[str, Any]:
-    """Derive dim/pooling/max_len from the checkpoint and refuse to disagree with SOURCES.
+    """Derive dim/pooling/max_len from the checkpoint; refuse to disagree with SOURCES.
 
-    A checkpoint that no longer matches the declared fingerprint is exactly the silent
-    drift §3.1 exists to prevent, so it fails the conversion instead of the retrieval.
+    Fails the conversion rather than the retrieval — this is the drift §3.1 exists for.
     """
     declared = dict(src.embedding or {})
     if not declared:
@@ -318,9 +299,8 @@ def convert_encoder(src: ModelSource, precision: str, out_root: Path) -> Path:
 def convert_reranker(src: ModelSource, precision: str, out_root: Path) -> Path:
     """Cross-encoder for GenAI's `TextRerankPipeline` (§10).
 
-    Exported through optimum-intel rather than the PyTorch frontend used by
-    `convert_encoder`: TextRerankPipeline expects optimum's sequence-classification layout
-    (config.json + openvino_model.xml + tokenizer), and a hand-rolled graph does not load.
+    Via optimum-intel, not the PyTorch frontend: the pipeline expects optimum's
+    sequence-classification layout, and a hand-rolled graph does not load.
     """
     try:
         from optimum.intel import OVModelForSequenceClassification, OVWeightQuantizationConfig
@@ -337,9 +317,8 @@ def convert_reranker(src: ModelSource, precision: str, out_root: Path) -> Path:
     ir_dir = _ir_dir(src, precision, out_root)
 
     log.info("convert.export_reranker", model=src.name, precision=precision)
-    # Quantize during export, not after. Post-hoc `nncf.compress_weights` on the saved IR
-    # means reading and writing the same .xml/.bin, which dies mid-write and leaves a model
-    # with no tokenizer beside it — TextRerankPipeline then fails to load.
+    # Quantize during export: post-hoc compress_weights rewrites the .xml/.bin in place,
+    # dies mid-write, and leaves a model the pipeline cannot load.
     quant = OVWeightQuantizationConfig(bits=8, sym=False) if precision == "int8" else None
     ov_model = OVModelForSequenceClassification.from_pretrained(
         snapshot, export=True, quantization_config=quant
@@ -351,7 +330,7 @@ def convert_reranker(src: ModelSource, precision: str, out_root: Path) -> Path:
 
     tokenizer = AutoTokenizer.from_pretrained(snapshot)
     tokenizer.save_pretrained(ir_dir)
-    # Two string inputs: a cross-encoder scores (query, passage), not one sequence.
+    # Two inputs: a cross-encoder scores (query, passage), not one sequence.
     _save_ov_tokenizer(tokenizer, ir_dir, with_detokenizer=False, number_of_inputs=2)
     return ir_dir
 
@@ -359,9 +338,8 @@ def convert_reranker(src: ModelSource, precision: str, out_root: Path) -> Path:
 def _name_tensors(model: ov.Model, inputs: list[str], outputs: list[str]) -> None:
     """The PyTorch frontend names tensors after graph node ids (`43`, `1893`).
 
-    Callers address tensors by name, so an unnamed `attention_mask` is a guessing game and
-    an unnamed `last_hidden_state` invites reading `pooler_output` by mistake — which would
-    silently degrade retrieval, the failure mode §3.1 exists to prevent.
+    Callers address tensors by name, and an unnamed `last_hidden_state` invites reading
+    `pooler_output` by mistake — silent retrieval degradation.
     """
     for port, name in zip(model.inputs, inputs, strict=False):
         port.get_tensor().set_names({name})
@@ -370,10 +348,9 @@ def _name_tensors(model: ov.Model, inputs: list[str], outputs: list[str]) -> Non
 
 
 def convert_causal_lm(src: ModelSource, precision: str, out_root: Path) -> Path:
-    """Qwen3-4B INT4 — needs optimum-intel's *stateful* export for `LLMPipeline` KV cache.
+    """Qwen3-4B INT4 — needs optimum-intel's stateful export for `LLMPipeline` KV cache.
 
-    Hand-rolling a stateful decoder export is not a workaround; if optimum cannot import,
-    this fails loudly rather than producing an IR that generates at 1/10th the speed.
+    Fails loudly if optimum cannot import, rather than shipping an IR that runs 10x slow.
     """
     try:
         from optimum.intel import OVModelForCausalLM, OVWeightQuantizationConfig
@@ -410,15 +387,13 @@ def convert_causal_lm(src: ModelSource, precision: str, out_root: Path) -> Path:
 def convert_vlm(src: ModelSource, precision: str, out_root: Path) -> Path:
     """Gemma 4 E2B — one checkpoint, several IRs, loaded together by `VLMPipeline`.
 
-    E2B is any-to-any, and its text tower does not stand alone: the per-layer embeddings
-    that make ~5B weights run as ~2B effective are a *separate* graph the pipeline feeds in.
-    `OVModelForCausalLM` would export the language model by itself, which then has no way to
-    receive them — so this goes through the image-text-to-text export even though this
-    project only ever sends text.
+    The text tower does not stand alone: the per-layer embeddings that make ~5B run as ~2B
+    are a separate graph the pipeline feeds in. `OVModelForCausalLM` would export the
+    language model with no way to receive them, so this takes the image-text-to-text path
+    even though the project only sends text.
     """
-    # `OVModelForImageTextToText` infers the task `image-to-text-with-past`, which the gemma4
-    # exporter rejects; `OVModelForVisualCausalLM` is the class whose export_feature is the
-    # `image-text-to-text` that optimum registered for this architecture.
+    # OVModelForImageTextToText infers `image-to-text-with-past`, which the gemma4 exporter
+    # rejects. This class's export_feature is the `image-text-to-text` optimum registered.
     from optimum.intel import OVModelForVisualCausalLM, OVWeightQuantizationConfig
 
     snapshot = snapshot_dir(src)
@@ -429,15 +404,13 @@ def convert_vlm(src: ModelSource, precision: str, out_root: Path) -> Path:
     bits = bits[precision]  # type: ignore[assignment]
 
     log.info("convert.export_vlm", model=src.name, precision=precision)
-    # 8-bit takes no mixed-precision knobs at all: optimum-intel 2.1 requires ratio 1.0 and
-    # per-channel (`group_size=-1`), because `ratio` is the *INT4* share and there is no
-    # second precision to fall back to. 4-bit keeps `convert_causal_lm`'s settings, so the
-    # two generators are compressed the same way and the comparison is about the models.
-    # No compression at fp16/fp32. NNCF computes its scales by *running* OpenVINO ops over
-    # each weight, and on arm64 the language model's reduce lands on an executor the CPU
-    # plugin does not implement (`ReduceMin`, at both 4 and 8 bits — it is not a bit-width
-    # problem). An uncompressed export is the only one that completes on this machine; it
-    # costs ~10 GB of RAM, so it is a way to *evaluate* the model here, not to ship it.
+    # 8-bit takes no mixed-precision knobs: `ratio` is the INT4 share, so optimum-intel 2.1
+    # requires 1.0 and group_size=-1. 4-bit matches convert_causal_lm, so the two generators
+    # compress alike and the comparison is about the models.
+    # No compression at fp16/fp32: NNCF computes scales by running OpenVINO ops per weight,
+    # and on arm64 the reduce hits an unimplemented CPU executor (`ReduceMin`, at 4 and 8
+    # bits alike). Uncompressed is the only export that completes here, at ~10 GB RAM — a
+    # way to evaluate the model on this machine, not to ship it.
     quant = None
     if bits == 4:
         quant = OVWeightQuantizationConfig(bits=4, group_size=128, ratio=0.8, sym=True)
@@ -455,8 +428,7 @@ def convert_vlm(src: ModelSource, precision: str, out_root: Path) -> Path:
     _fix_chat_template_for_minja(tokenizer, model=src.name)
     tokenizer.save_pretrained(ir_dir)
     _save_ov_tokenizer(tokenizer, ir_dir, with_detokenizer=True)
-    # VLMPipeline reads the processor config next to the IR; without it the pipeline cannot
-    # build the prompt template and fails at load, not at generate.
+    # VLMPipeline needs the processor config beside the IR, or it fails at load.
     try:
         processor = AutoProcessor.from_pretrained(snapshot)
         _fix_chat_template_for_minja(processor, model=src.name)
@@ -470,23 +442,17 @@ _ADJACENT_STRING_LITERALS = re.compile(r'("(?:[^"\\]|\\.)*")(\s+)("(?:[^"\\]|\\.
 
 
 def _fix_chat_template_for_minja(carrier: Any, *, model: str) -> None:
-    """Collapse Jinja's implicit adjacent-string-literal concatenation on `carrier.chat_template`.
+    """Collapse Jinja's adjacent-string-literal concatenation on `carrier.chat_template`.
 
-    Real Jinja2 (and Python) let `"a" "b"` inside a call mean `"a" + "b"`; the minimal Jinja
-    engine `openvino_genai` uses to apply chat templates (minja) does not, and fails the
-    *whole* template with `Expected closing parenthesis` — even for a branch this project
-    never takes. Gemma 4's `chat_template.jinja` hits this in its tool-calling
-    `raise_exception(...)` message, which is dead code here (nothing sends `tool_calls`), but
-    minja parses the template up front, so a syntax error anywhere is fatal at generate time.
+    minja (the engine openvino_genai uses) does not support `"a" "b"` == `"a" + "b"` and
+    fails the whole template with `Expected closing parenthesis`. Gemma 4 hits this in a
+    tool-calling branch that is dead here, but minja parses up front, so it is fatal.
 
-    Must run on the in-memory `tokenizer.chat_template` / `processor.chat_template` *before*
-    `save_pretrained`/`_save_ov_tokenizer`: `openvino_tokenizers.convert_tokenizer` bakes the
-    template into the tokenizer IR's rt_info at conversion time, so patching the written
-    `chat_template.jinja` file afterward is silently too late — `VLMPipeline` reads the baked
-    copy, not the loose file.
+    Must run on the in-memory template *before* save: `convert_tokenizer` bakes it into the
+    tokenizer IR's rt_info, and `VLMPipeline` reads the baked copy, not the loose file.
 
-    Regex, not a hardcoded literal: robust to Google editing the message text later, and
-    logs when it actually changes something so a silent non-match is visible.
+    Regex rather than a literal, so Google editing the message text does not silently
+    break the match; logs when it changes something.
     """
     template = getattr(carrier, "chat_template", None)
     if not template:
@@ -507,9 +473,8 @@ def _fix_chat_template_for_minja(carrier: Any, *, model: str) -> None:
 def _is_pir(model_file: Path) -> bool:
     """PaddlePaddle 3.0 replaced the protobuf `.pdmodel` with a JSON PIR program.
 
-    OpenVINO's Paddle frontend reads the legacy protobuf only; handed a PIR file it fails with
-    the unhelpful "Cannot recognize input model." Every PaddlePaddle HF repo now ships PIR —
-    v4 mobile as well as v5 — so this is the normal path, not the exception.
+    OpenVINO's Paddle frontend reads legacy protobuf only, and fails PIR with "Cannot
+    recognize input model." Every PaddlePaddle HF repo now ships PIR, so this is the norm.
     """
     if model_file.suffix != ".json":
         return False
@@ -520,9 +485,8 @@ def _is_pir(model_file: Path) -> bool:
 def _pir_to_onnx(model_file: Path, params_file: Path, dest: Path) -> Path:
     """PIR -> ONNX via Paddle's own exporter, so provenance stays with PaddlePaddle.
 
-    The alternative was a community ONNX re-upload; §3.1 makes model identity a hard
-    requirement and those repos are unvetted, so the official converter wins even though it
-    drags in the paddlepaddle runtime at conversion time.
+    §3.1 makes model identity a hard requirement, so an unvetted community ONNX re-upload
+    loses to the official converter — even though it drags in the paddle runtime.
     """
     try:
         import paddle2onnx
@@ -580,12 +544,9 @@ def _save_ov_tokenizer(
 ) -> None:
     """§0.4 — every model runs through OpenVINO, tokenisers included.
 
-    Saved **uncompressed**. `ov.save_model` defaults to `compress_to_fp16=True`, which is
-    right for encoder activations and wrong here: a tokenizer's weights are a vocabulary
-    table, not activations, so f16 buys nothing and BGE-M3's Unigram/SentencePiece op is a
-    *reference* implementation that reads its vocab scores as f32. Compressed, it dies at
-    infer time with "element type f16, is not representable as pointer to f32" — a failure
-    that surfaces in the embedder, three layers away from its cause.
+    Saved uncompressed: `save_model` defaults to fp16, but a tokenizer's weights are a
+    vocab table, and BGE-M3's Unigram op is a reference implementation that reads scores as
+    f32. Compressed it dies at infer time, three layers from its cause.
     """
     try:
         from openvino_tokenizers import convert_tokenizer
@@ -615,11 +576,9 @@ def _save_ov_tokenizer(
 def _is_converted(ir_dir: Path) -> bool:
     """Is there a usable IR here already? Mirrors `registry.ModelEntry.is_converted`.
 
-    `hf_vlm` writes no `openvino_model.{xml,bin}` at all, so the single-file check this
-    replaced was never satisfied for a VLM — meaning `scripts.setup` re-exported and
-    re-quantised the ~14-minute gemma-4 build on every run, and `--overwrite` meant nothing
-    for that kind. Both pairs are checked xml *and* bin, so a half-written export
-    (interrupted between the two) re-converts rather than being trusted.
+    `hf_vlm` writes no `openvino_model.*`, so a single-file check never held for a VLM and
+    setup re-ran the ~14-minute gemma-4 build every time. Checks xml *and* bin, so a
+    half-written export re-converts rather than being trusted.
     """
     pairs = (
         (IR_XML_NAME, IR_BIN_NAME),
@@ -631,24 +590,19 @@ def _is_converted(ir_dir: Path) -> bool:
 def regenerate_tokenizer(name: str, cfg: Config, *, out_root: Path = IR_ROOT) -> Path:
     """Rewrite only `openvino_tokenizer.xml` beside an already-converted model.
 
-    Kept separate from `convert(..., overwrite=True)` on purpose: re-running the full
-    conversion re-quantises the weights, which produces a different `ir_sha256` and so
-    invalidates every index built against the old one (§3.1 rule 4). A tokenizer defect
-    is not a reason to force a re-index.
+    Separate from `convert(overwrite=True)`: a full re-convert re-quantises, changing
+    `ir_sha256` and invalidating every index (§3.1 rule 4). A tokenizer defect is not a
+    reason to force a re-index.
 
-    Mirrors whatever the entry's own converter writes on the tokenizer side, which for
-    `hf_vlm` is more than one file: the chat template is patched for minja *before* saving
-    (`openvino_tokenizers` bakes it into the tokenizer IR's rt_info, and `VLMPipeline` reads
-    the baked copy, not the loose `chat_template.jinja`), and the processor config is
-    rewritten too, since `VLMPipeline` will not load without it.
+    Mirrors what the entry's converter writes — for `hf_vlm` that is the minja-patched chat
+    template (baked into rt_info at save time) and the processor config as well.
     """
     from models.registry import spec_for
 
     _, spec = spec_for(name, cfg)
     src = source_for(spec.name)
     ir_dir = _ir_dir(src, spec.precision, out_root)
-    # `hf_vlm` exports a multi-part IR with no `openvino_model.xml` at all — the language
-    # tower stands in as the "is this converted" marker, same rule as ModelEntry.is_converted.
+    # hf_vlm has no `openvino_model.xml`; the language tower is the converted-marker.
     if not _is_converted(ir_dir):
         raise ConversionError(
             f"{src.name}: no converted IR at {ir_dir} — there is nothing to regenerate a "
@@ -715,10 +669,8 @@ def convert(
             seconds=round((datetime.now(UTC) - started).total_seconds(), 1),
         )
 
-    # §3.1 rule 4 — `ir_sha256` is the model's real identity, and a `hf_vlm` export has no
-    # `openvino_model.bin` to hash. Its language tower is the pair `models/registry.py`
-    # already verifies against, so hashing anything else would record a fingerprint nothing
-    # checks. Same choice as `registry.verify_fingerprint`, deliberately.
+    # §3.1 rule 4. hf_vlm has no `openvino_model.bin`, so hash the language tower — the
+    # same pair registry.verify_fingerprint checks. Hashing anything else checks nothing.
     bin_path = ir_dir / VLM_LANGUAGE_MODEL_BIN_NAME
     if not bin_path.exists():
         bin_path = ir_dir / IR_BIN_NAME
@@ -738,9 +690,8 @@ def convert(
 def _relative_to_manifest(ir_dir: Path, manifest_path: Path = MANIFEST_PATH) -> str:
     """Manifest paths are relative to the manifest file, so the tree can be relocated.
 
-    `.as_posix()`, not `str()` — the manifest is committed to git and read cross-platform
-    (§7.3), and `WindowsPath.__str__` emits `\\` separators that are not path separators on
-    the machines this file also has to load on.
+    `.as_posix()`, not `str()`: the manifest is committed and read cross-platform (§7.3),
+    and `WindowsPath.__str__` emits separators the other machines cannot use.
     """
     base = manifest_path.resolve().parent
     try:

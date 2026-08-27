@@ -1,23 +1,17 @@
 """OCR — ARCHITECTURE.md §3 `ocr`: page images -> `list[Block]` with bbox.
 
-PaddleOCR **mobile** detection + recognition through OpenVINO (§3, §7.6 — never the server
-models, they will not hit interactive latency on the target i5). One shared detector feeds
-per-script recognition heads.
+PaddleOCR mobile det + rec through OpenVINO (§3, §7.6 — never the server models, they miss
+interactive latency on the target i5). One shared detector, per-script recognition heads.
 
-Provenance is the whole job (§0.2). `page` is 1-indexed and `bbox` is normalised to 0-1
-against the page image: `core.schema.Block` rejects raw pixel coordinates, and a citation
-drawn from an un-normalised bbox highlights the wrong part of the page.
+Provenance is the job (§0.2): `page` is 1-indexed and `bbox` is normalised to 0-1, because
+an un-normalised bbox highlights the wrong part of the page.
 
-Everything model-shaped sits behind the `TextDetector` / `TextRecognizer` protocols, and
-`ingest/ocr_paddle.py` holds the PaddleOCR-through-OpenVINO implementations. The tests drive
-this same pipeline with stubs, so bbox arithmetic, reading order, thresholds and caching are
-verifiable without an IR on disk.
+Models sit behind the `TextDetector` / `TextRecognizer` protocols (implementations in
+`ingest/ocr_paddle.py`), so bbox arithmetic, reading order, thresholds and caching are all
+testable with stubs.
 
-This stage only runs on scanned pages. `ingest/load.py` sets `has_text_layer=True` when
-pymupdf found a native text layer, and §3 skips OCR entirely for those.
-
-Deliberately not attempted: table structure (that is layout analysis; a line-level OCR box
-cannot see it, so `kind` is never `table`), skew correction, and handwriting (§11).
+Runs only on scanned pages — `ingest/load.py` sets `has_text_layer` and §3 skips those.
+Not attempted: table structure, skew correction, handwriting (§11).
 """
 
 from __future__ import annotations
@@ -37,9 +31,8 @@ from core.cache import CacheKey, StageCache, hash_bytes, stage_timer
 from core.config import Config
 from core.schema import SCRIPTS, BBox, Block
 
-# Backwards, module-order-wise: `normalize` runs after `ocr`. But script detection is a pure
-# Unicode-range lookup and re-implementing those ranges here to avoid the import would be a
-# second copy of the table that decides how every chunk is tokenised.
+# Backwards module-order-wise, but re-implementing the ranges here would be a second copy
+# of the table that decides how every chunk is tokenised.
 from ingest.load import PageImage
 from ingest.normalize import detect_script
 
@@ -50,8 +43,8 @@ SCRIPT_HEAD_ROLES: dict[str, str] = {"ocr_rec_taml": "taml", "ocr_rec_latn": "la
 
 STAGE_VERSION = "ocr/1"
 
-#: The recogniser key used when no dedicated per-script head is registered. PP-OCRv5 mobile
-#: rec is itself multilingual, so this is the normal case, not a degraded one.
+#: Key for when no per-script head is registered. v5 mobile rec is multilingual, so this
+#: is the normal case, not a degraded one.
 DEFAULT_SCRIPT = "unknown"
 
 _HEADING_HEIGHT_RATIO = 1.25
@@ -71,22 +64,19 @@ class OcrModelError(OcrError):
 
 @dataclass(frozen=True)
 class OcrParams:
-    """Every tunable in this stage, in one bag, so the cache key can hash all of it.
+    """Every tunable in this stage, in one bag, so the cache key hashes all of it.
 
-    These are not in `configs/base.yaml`: §6 fixes that file's shape and `core/config.py`
-    forbids extra keys, so an `ocr:` block there is a change to another agent's contract.
-    Pass a different `OcrParams` to tune; the stage cache keys on `digest()` and re-OCRs.
+    Not in `configs/base.yaml`: §6 fixes that file's shape. Pass a different `OcrParams`;
+    the cache keys on `digest()` and re-OCRs.
 
-    `min_confidence` is deliberately permissive. CLAUDE.md records the measurement from a
-    prior run: Tamil recognition returns 0.4-0.6 on clean scans where the output is visibly
-    correct while Latin on the same page returns 0.9+, so any uniform threshold at or above
-    0.4 drops most correct Tamil. 0.30 sits below the observed correct-Tamil floor and still
-    discards near-zero-confidence noise. `confidence_by_script` is **empty by default** —
-    per-script numbers are a calibration decision that needs labelled pages, not a guess.
+    `min_confidence` is permissive on purpose. Tamil rec returns 0.4-0.6 on clean scans
+    that are visibly correct, where Latin on the same page returns 0.9+, so any uniform
+    threshold at 0.4+ drops most correct Tamil. 0.30 sits below that floor and still cuts
+    near-zero noise. `confidence_by_script` is empty by default — per-script numbers need
+    labelled pages, not a guess.
     """
 
-    # Detection defaults are PaddleOCR's own, read from the PP-OCRv5_mobile_det checkpoint
-    # metadata (DetResizeForTest.resize_long, DBPostProcess.*) — upstream values, not guesses.
+    # Upstream values, read from the PP-OCRv5_mobile_det checkpoint metadata.
     det_limit_side_len: int = 960
     det_thresh: float = 0.3
     det_box_thresh: float = 0.6
@@ -224,11 +214,9 @@ def _normalise_bbox(box: DetBox, height: int, width: int) -> BBox | None:
 class OcrEngine:
     """Shared detector, per-script recognition heads (§3).
 
-    Head selection is a single pass plus a targeted retry: the default head reads every
-    crop, and any line whose text is in a script that *has* a dedicated head is re-read by
-    it. The dedicated head's output wins outright rather than winning on confidence —
-    confidence is not comparable across heads, which is exactly the calibration trap
-    CLAUDE.md documents for Tamil.
+    One pass plus a targeted retry: the default head reads every crop, and lines in a
+    script that has a dedicated head are re-read by it. The dedicated head wins outright,
+    not on confidence — confidence is not comparable across heads.
     """
 
     def __init__(
@@ -242,8 +230,8 @@ class OcrEngine:
         unknown = sorted(set(recognizers) - SCRIPTS)
         if unknown:
             raise OcrError(f"recognition heads keyed by unknown scripts: {unknown}")
-        # Routing looks a head up by its key and re-keys the result by `head.script`; if the
-        # two disagree the re-key hits a script with no head registered under it.
+        # Routing keys on lookup but re-keys on `head.script`; a disagreement lands on a
+        # script with no head registered.
         mismatched = sorted(k for k, r in recognizers.items() if r.script != k)
         if mismatched:
             raise OcrError(
@@ -308,9 +296,8 @@ class OcrEngine:
         return blocks
 
     def _threshold_for(self, text: str, script: str) -> float:
-        """The default head is multilingual and has no script of its own, so a threshold keyed
-        on `head.script` would make `confidence_by_script` a no-op in the shipping engine —
-        where that head reads every line. Fall back to the script of the text it read."""
+        """The default head has no script of its own, so keying on `head.script` would make
+        `confidence_by_script` a no-op. Fall back to the script of the text it read."""
         if script == DEFAULT_SCRIPT:
             script = detect_script(text)
         return self.params.threshold_for(script)
@@ -318,12 +305,11 @@ class OcrEngine:
     def _recognize(
         self, crops: Sequence[np.ndarray], script_hint: str | None = None
     ) -> tuple[list[RecResult], list[str]]:
-        # `script_hint` exists because text-based routing cannot bootstrap itself. The retry
-        # below picks a head by running `detect_script` on what the *default* head produced,
-        # which only works if that head can represent the script at all. PP-OCRv5's default
-        # charset contains no Tamil, so a Tamil line comes back as CJK noise, `detect_script`
-        # says `hans`, and the Tamil head is never consulted — the page reads as confident
-        # garbage. When the caller knows the document's script, it says so and that head leads.
+        # Text-based routing cannot bootstrap itself: the retry picks a head by running
+        # `detect_script` on the *default* head's output, which only works if that head can
+        # represent the script. v5's charset has no Tamil, so Tamil comes back as CJK noise,
+        # detect says `hans`, and the Tamil head is never consulted. A caller that knows the
+        # document's script says so, and that head leads.
         primary = self.recognizers.get(script_hint or "", self._primary)
         results = list(primary.recognize(crops))
         scripts = [primary.script] * len(results)
@@ -384,8 +370,8 @@ def ocr_page(
 ) -> list[Block]:
     """One page through det + rec, cached on the page's own pixels.
 
-    Caching is per page, not per document: OCR is the slowest stage in the system, and a
-    document-level entry means a run that dies on page 150 re-OCRs pages 1-149 (CLAUDE.md).
+    Per page, not per document: a document-level entry means a run that dies on page 150
+    re-OCRs pages 1-149.
     """
     params = engine.params
     input_hash = _page_hash(doc_id, image, engine, params)
@@ -403,9 +389,8 @@ def ocr_page(
             stage="ocr",
             input_hash=input_hash,
             stage_version=STAGE_VERSION,
-            # The hint selects which head reads the page, so two hints are two different
-            # results for identical pixels. Leaving it out of the key serves Chinese-charset
-            # noise from a cache entry made before the Tamil head existed.
+            # Two hints are two results for identical pixels; out of the key, this serves
+            # CJK noise cached before the Tamil head existed.
             config_hash=f"{config_hash}:{params.digest()}:{script_hint or '-'}",
         )
         return cache.get_or_compute(key, Block, compute, span=span)
@@ -422,8 +407,7 @@ def ocr_pages(
 ) -> list[Block]:
     """Every page of one document, with `reading_order` renumbered document-wide.
 
-    `block_id` stays page-local so a cached page stays valid whatever else is OCR'd
-    alongside it; only `reading_order` is global, matching `ingest/load.py`.
+    `block_id` stays page-local so a cached page survives whatever else is OCR'd with it.
     """
     with stage_timer("ocr.document", doc_id) as span:
         blocks: list[Block] = []
@@ -451,11 +435,10 @@ def build_engine(
     manifest_path: str | Path | None = None,
     extra_heads: Mapping[str, TextRecognizer] | None = None,
 ) -> OcrEngine:
-    """The production engine: `ocr_det` + `ocr_rec` from the manifest, device fallback included.
+    """`ocr_det` + `ocr_rec` from the manifest, with the §7.4 device fallback.
 
-    Loading happens here and nowhere else in this module, so every other entry point stays
-    testable without an IR on disk. Nothing here touches the network (§0.3) — a missing
-    model raises with the setup command to run.
+    The only loader in this module, so every other entry point stays testable without an IR.
+    No network (§0.3) — a missing model raises with the setup command to run.
     """
     from ingest.ocr_paddle import PaddleTextDetector, PaddleTextRecognizer, load_charset
     from models.registry import ir_sha256, load_model
@@ -484,8 +467,7 @@ def build_engine(
             script=DEFAULT_SCRIPT,
         )
     }
-    # Per-script heads (§3). Each is optional; an unconfigured one simply means that script
-    # has no dedicated reader, not that the engine is broken.
+    # Per-script heads (§3). Optional — absent means no dedicated reader, not broken.
     for role, script in SCRIPT_HEAD_ROLES.items():
         if getattr(cfg.models, role, None) is None:
             continue

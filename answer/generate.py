@@ -1,33 +1,21 @@
 """Answer generation — ARCHITECTURE.md §4, §9, §1 (streaming), §0.6 (abstain).
 
-The §4 flow, end to end:
-
     retrieve k -> if top score < tau ABSTAIN -> take n_context -> trim to the prompt budget
     -> prompt with numbered blocks -> stream -> cite.verify() strips invented [n] -> Answer
 
-Two rules shape the code more than anything else:
+Abstain beats hallucinate (§0.6). Below `tau` no model runs at all. The model may also
+abstain itself (`answer/prompt.py` rule 5); we take it at its word and drop the citations.
 
-**Abstain beats hallucinate (§0.6).** Below `tau` no model runs at all — there is nothing
-to ground an answer in, and a fluent guess is the worst possible output for a study tool.
-The model is also told to reply with the abstain message when the context does not cover
-the question (`answer/prompt.py` rule 5); when it does, we take it at its word and drop the
-citations rather than shipping an "answer" that says it found nothing but points at pages.
+Trimming beats failing (BLOCKERS #11). `n_context` is a request: INT4 CPU MatMul cannot
+build a descriptor much above 7k prompt tokens, and Tamil hits it first at ~1.1 chars/token
+against English's 2.33. Context is trimmed from the tail to `generate.max_prompt_tokens`.
 
-**Trimming beats failing (BLOCKERS #11).** `n_context` is a request, not a guarantee. OpenVINO's
-INT4 CPU MatMul cannot build a primitive descriptor much above 7k prompt tokens, and Tamil hits
-that first — it tokenizes at ~1.1 chars/token against English's 2.33, so five Tamil chunks are
-~10.4k tokens where five English ones are ~4.7k. Context is therefore trimmed from the tail to
-`generate.max_prompt_tokens` before the model is ever called. An answer from three chunks is
-worth more than an exception from five.
+`StreamingGenerator` is a Protocol and `OpenVinoGenerator` takes its pipeline as an
+argument, so the worker thread, queue, cancellation and token accounting are all testable
+without the 2.5 GB INT4 IR.
 
-**The pipeline is injectable.** `StreamingGenerator` is a Protocol, so every test here runs
-against a fake and none need the 2.5 GB INT4 IR. `OpenVinoGenerator` takes its `LLMPipeline`
-as a constructor argument for the same reason: the streaming machinery — worker thread,
-queue, cancellation, token accounting — is testable without a converted model.
-
-Tier 3 (§9) is reached only when Tier 1 abstained *and* the user explicitly opted in. Its
-wording, disclaimer and marker-stripping live in `answer/prompt.py`; this module only
-decides when it is allowed to run.
+Tier 3 (§9) runs only when Tier 1 abstained and the user opted in; its wording lives in
+`answer/prompt.py`, and this module only decides when it may run.
 """
 
 from __future__ import annotations
@@ -72,9 +60,8 @@ STAGE_RETRIEVE = "retrieve"
 STAGE_GENERATE = "generate"
 STAGE_GENERATE_TIER3 = "generate_tier3"
 
-#: How long to wait for the worker thread after the consumer abandons the stream. The
-#: streamer callback checks the cancel flag between tokens, so one token of decode is the
-#: worst case; the timeout only stops a wedged pipeline from hanging the UI.
+#: Worker-thread join after the consumer abandons the stream. The callback checks the
+#: cancel flag between tokens, so this only stops a wedged pipeline hanging the UI.
 _JOIN_TIMEOUT_S = 30.0
 
 _DONE = object()
@@ -124,16 +111,11 @@ class GenerationSettings:
 class StreamingGenerator(Protocol):
     """Anything that can stream text. The seam that keeps this module testable.
 
-    `requested_device` is what `configs/base.yaml` asked for and `device` is what the load
-    actually got — both are reported so a silent CPU fallback (§7.4) shows up in telemetry.
+    `requested_device` vs `device`: asked-for vs got, so a silent CPU fallback (§7.4) shows
+    up in telemetry.
 
-    Optional: a `last_usage: TokenUsage | None` attribute, set when a stream completes. It
-    is read with `getattr`, so a generator that cannot count tokens simply omits it and the
-    trace records zero rather than an invented number (§0.5).
-
-    Optional: a `count_tokens(text) -> int` method, used to hold the prompt under
-    `max_prompt_tokens` (BLOCKERS #11). Also read with `getattr`; a generator that omits it
-    falls back to `answer.prompt.estimate_tokens`.
+    Optional, both read with `getattr`: `last_usage` (omitted -> trace records zero rather
+    than an invented number, §0.5) and `count_tokens` (omitted -> `prompt.estimate_tokens`).
     """
 
     name: str
@@ -148,14 +130,11 @@ class StreamingGenerator(Protocol):
 class OpenVinoGenerator:
     """OpenVINO GenAI `LLMPipeline`, streamed (§1, §4).
 
-    `LLMPipeline.generate` is blocking and pushes tokens through a callback, so it runs on a
-    worker thread and the callback feeds a queue this iterator drains. That is what makes
-    generation *incremental* to the caller — the UI can paint the first token instead of
-    waiting for 512 of them, which is the whole point of the TTFT number in §5.
+    `generate` is blocking and pushes tokens through a callback, so it runs on a worker
+    thread feeding a queue this iterator drains — that is what makes the UI paint the first
+    token instead of waiting for 512 (§5 TTFT).
 
-    The pipeline object is injected rather than built in `__init__`: `load_generator` builds
-    the real one, and tests pass anything exposing
-    `generate(prompt, generation_config, streamer)`.
+    The pipeline is injected: `load_generator` builds the real one, tests pass a fake.
     """
 
     def __init__(
@@ -175,10 +154,8 @@ class OpenVinoGenerator:
     def count_tokens(self, text: str) -> int:
         """Exact prompt length, from the pipeline's own tokenizer.
 
-        This is what makes the BLOCKERS #11 budget trustworthy: the character-rate estimate
-        is calibrated on averages, while this is the number the MatMul will actually see. A
-        GenAI build that exposes no tokenizer falls back to the estimate — an approximate
-        budget still beats the failure it prevents.
+        What makes the BLOCKERS #11 budget trustworthy — the number the MatMul will see,
+        not a character-rate average. Falls back to the estimate if no tokenizer.
         """
         try:
             ids = self.pipe.get_tokenizer().encode(text).input_ids
@@ -191,8 +168,7 @@ class OpenVinoGenerator:
         genai = _genai()
         cfg = genai.GenerationConfig()
         cfg.max_new_tokens = settings.max_new_tokens
-        # temperature 0 means "be reproducible", which is greedy decoding, not sampling with
-        # a degenerate temperature — the latter is a division by zero in most kernels.
+        # temperature 0 is greedy decoding, not sampling at 0 — that divides by zero.
         if settings.temperature > 0.0:
             cfg.do_sample = True
             cfg.temperature = settings.temperature
@@ -207,9 +183,8 @@ class OpenVinoGenerator:
         running = int(genai.StreamingStatus.RUNNING)
         cancelled = int(genai.StreamingStatus.CANCEL)
 
-        # Unbounded by design: it can hold at most `max_new_tokens` pieces, and a bounded
-        # queue would let a slow consumer block the worker inside the callback, where the
-        # cancel flag can no longer be checked.
+        # Unbounded: holds at most `max_new_tokens`, and bounding it would let a slow
+        # consumer block the worker inside the callback, where cancel is not checked.
         pieces: queue.Queue[Any] = queue.Queue()
         cancel = threading.Event()
         outcome: dict[str, Any] = {}
@@ -222,10 +197,8 @@ class OpenVinoGenerator:
 
         def work() -> None:
             try:
-                # Keyword, not positional (BLOCKERS #16): LLMPipeline's only overload names
-                # these two the same, so this is a no-op there — but VLMPipeline has 9
-                # overloads and none of them accept 3 positional args for text-only input;
-                # its pure-text overload is `generate(self, prompt, **kwargs)`.
+                # Keyword, not positional (BLOCKERS #16): a no-op for LLMPipeline, but
+                # VLMPipeline's text overload is `generate(self, prompt, **kwargs)`.
                 outcome["result"] = self.pipe.generate(
                     prompt, generation_config=gen_cfg, streamer=streamer
                 )
@@ -261,17 +234,13 @@ def load_generator(
 ) -> OpenVinoGenerator:
     """Build the configured generator, with the §7.4 device fallback and the §7.2 cache.
 
-    `models/registry.py` compiles an `ov.CompiledModel`; `LLMPipeline` wants the IR
-    directory and a device string instead, so the manifest lookup and fallback are done
-    here against the same manifest, not duplicated policy.
+    `registry` compiles a `CompiledModel`, but `LLMPipeline` wants an IR directory and a
+    device string, so the lookup and fallback run here against the same manifest.
 
-    `entry.is_vlm` (BLOCKERS #16) picks `VLMPipeline` over `LLMPipeline` for a multi-part
-    IR (e.g. `gemma-4-e2b-it`, any-to-any so the language tower does not stand alone). The
-    two constructors are not call-compatible: `LLMPipeline` takes `config` as its third
-    *positional* argument, but `VLMPipeline`'s text-only overload is
-    `(models_path, device, **kwargs)` — a positional third argument does not match any of
-    its nine overloads and raises `TypeError` before the model ever loads. Device
-    properties are therefore passed as `**ov_config` for `VLMPipeline`.
+    `entry.is_vlm` (BLOCKERS #16) picks `VLMPipeline` for a multi-part IR. The two are not
+    call-compatible: `LLMPipeline` takes `config` third positionally, `VLMPipeline`'s text
+    overload is `(models_path, device, **kwargs)` and raises `TypeError` on a third
+    positional — so device properties go through `**ov_config` there.
     """
     from models.registry import ModelNotFound, load_manifest, ov_version, select_device, spec_for
 
@@ -337,10 +306,9 @@ def load_generator(
 
 @dataclass(frozen=True)
 class AnswerResult:
-    """Everything the UI needs to render one answer without making a decision of its own.
+    """Everything the UI needs to render one answer without deciding anything itself.
 
-    `tier` is mandatory rather than derived: §9 requires the answer tier to be visible on
-    every answer, and `Answer` carries no tier field.
+    `tier` is mandatory, not derived: §9 requires it visible, and `Answer` has no such field.
     """
 
     answer: Answer
@@ -348,19 +316,17 @@ class AnswerResult:
     hits: tuple[Retrieved, ...]
     context: tuple[Retrieved, ...]
     trace: QueryTrace
-    #: Citation markers the model wrote, and how many survived `cite.verify`. Counted here
-    #: because `answer.text` is already cleaned — by the time anyone else sees it the invented
-    #: markers are gone, and the difference between the two is the whole groundedness signal.
+    #: Markers the model wrote, and how many survived `cite.verify`. Counted here because
+    #: `answer.text` is already cleaned, and the difference is the groundedness signal.
     markers_emitted: int = 0
     markers_grounded: int = 0
 
     @property
     def groundedness(self) -> float:
-        """Fraction of the model's citation markers that pointed at real retrieved context.
+        """Fraction of the model's citation markers that pointed at real context.
 
-        A non-abstaining answer that cited nothing scores 0.0: §4 requires every claim to
-        carry a citation, so an uncited assertion is the exact failure this number exists to
-        catch. Abstentions make no claim and should be excluded by the caller, not scored.
+        A non-abstaining answer that cited nothing scores 0.0 — §4 requires every claim to
+        carry a citation. Abstentions make no claim; callers exclude them rather than score.
         """
         if not self.markers_emitted:
             return 0.0
@@ -378,11 +344,10 @@ class AnswerResult:
     def model_abstained(self) -> bool:
         """Did the *model* decline, on context retrieval had already accepted?
 
-        The two abstentions look identical in `Answer` and are not the same failure: one
-        means nothing scored above `tau`, the other means the model refused material that
-        did. Telling a student "nothing above the score threshold" when the top hit scored
-        0.608 is simply false (BLOCKERS #17). `context` is what separates them — it is
-        populated only once the §4 gate has been passed and blocks were fitted into a prompt.
+        Identical in `Answer`, but not the same failure: nothing above `tau`, versus the
+        model refusing material that cleared it. Saying "nothing above the threshold" when
+        the top hit scored 0.608 is false (BLOCKERS #17). `context` separates them — it is
+        populated only past the §4 gate.
         """
         return self.abstained and bool(self.context)
 
@@ -390,14 +355,12 @@ class AnswerResult:
 class AnswerStream:
     """One query's answer, streamed. Iterate for deltas, then read `.result`.
 
-    Deltas are **provisional**: they are raw model text, so an invented `[7]` can appear in
-    a delta and be gone from the final answer once `answer/cite.py` has run. Render deltas
-    live for responsiveness, then replace them with `result.answer.text`, which is the only
-    verified form. Never assemble an `Answer` out of deltas.
+    Deltas are provisional raw model text: an invented `[7]` can appear in one and be gone
+    from the final answer. Render them live, then replace with `result.answer.text`, the
+    only verified form. Never assemble an `Answer` out of deltas.
 
-    The stream owns the `TraceRecorder`: it records stages, device, tokens and TTFT, and
-    calls `finish()` at the end. Pass your own recorder to set `lang`/`config_hash`/
-    `trace_id` or to time earlier work — but do not finish it yourself.
+    The stream owns the `TraceRecorder` and calls `finish()`. Pass your own to set
+    lang/config_hash/trace_id or time earlier work, but do not finish it yourself.
     """
 
     def __init__(
@@ -621,10 +584,8 @@ def generate_answer(
 def _is_abstain_text(text: str) -> bool:
     """Did the model use its §4 escape hatch?
 
-    `answer/prompt.py` rule 5 tells the model to reply with exactly `ABSTAIN_MESSAGE` when
-    the context does not answer the question. Models wrap it in quotes or drop the full
-    stop, so compare loosely — but only against that one sentence, never against a general
-    notion of uncertainty.
+    Rule 5 asks for exactly `ABSTAIN_MESSAGE`; models quote it or drop the full stop, so
+    compare loosely — but only to that sentence, never to uncertainty in general.
     """
     return _normalise(text) == _normalise(ABSTAIN_MESSAGE)
 
@@ -636,9 +597,8 @@ def _normalise(text: str) -> str:
 def _usage_from(result: Any) -> TokenUsage | None:
     """Token counts from GenAI's own perf counters, or nothing at all.
 
-    §0.5: a fabricated number is worse than a missing one, so a build that reports no
-    metrics leaves the trace's token columns at zero rather than guessing from piece counts
-    (a streamed piece is not reliably one token).
+    §0.5 — a fabricated number is worse than a missing one, and a streamed piece is not
+    reliably one token.
     """
     metrics = getattr(result, "perf_metrics", None)
     if metrics is None:
