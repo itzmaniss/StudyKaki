@@ -23,6 +23,7 @@ from answer.prompt import (
     estimate_tokens,
     fit_context,
     format_context,
+    language_reminder_for,
     render_tier3_answer,
 )
 from answer.sources.online import DisabledOnlineSource, OnlineSource
@@ -370,3 +371,40 @@ def test_tier2_module_imports_nothing_that_can_reach_the_network():
     body = source.read_text()
     for forbidden in ("requests", "urllib", "httpx", "aiohttp", "socket", "http.client"):
         assert f"import {forbidden}" not in body
+
+
+# --- language reminder (BLOCKERS #21) -------------------------------------------------
+
+
+def test_no_reminder_by_default(hits):
+    """Off unless asked: it re-baselines every eval number, so it is opt-in per model."""
+    assert "(Answer in" not in build_prompt("what is a matrix?", hits)
+
+
+def test_reminder_sits_between_the_context_and_the_answer_cue(hits):
+    """Position is the point — rule 1 says this thousands of tokens earlier and is lost."""
+    p = build_prompt("what is a matrix?", hits, language_reminder=True)
+    assert p.endswith("(Answer in English.)\nAnswer:")
+    assert p.index("Context:") < p.index("(Answer in English.)")
+
+
+def test_the_reminder_names_the_question_language_not_the_context_language(hits):
+    """The context blocks here are Latin-script; the reminder must follow the question."""
+    tamil = build_prompt("அணி என்றால் என்ன?", hits, language_reminder=True)
+    chinese = build_prompt("矩阵是什么？", hits, language_reminder=True)
+    assert "(Answer in Tamil.)" in tamil
+    assert "(Answer in Chinese.)" in chinese
+
+
+def test_an_unnameable_language_gets_no_reminder(hits):
+    """Better silent than telling a model to answer in \"und\"."""
+    assert language_reminder_for("12345 -- ...") == ""
+    assert "(Answer in" not in build_prompt("12345 -- ...", hits, language_reminder=True)
+
+
+def test_the_reminder_survives_context_trimming(hits):
+    """`fit_context` rebuilds the prompt per candidate slice; it must not drop it."""
+    fitted = fit_context(
+        "what is a matrix?", hits, max_prompt_tokens=100000, language_reminder=True
+    )
+    assert "(Answer in English.)" in fitted.prompt

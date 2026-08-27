@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 from answer.cite import strip_all_markers
 from core.schema import Answer, Chunk, Retrieved
-from ingest.normalize import script_histogram
+from ingest.normalize import detect_script, lang_for_script, script_histogram
 
 # §0.6 — the literal abstain text. Do not paraphrase; the UI and eval both match on it.
 ABSTAIN_MESSAGE = "I couldn't find this in your documents."
@@ -25,6 +25,15 @@ ABSTAIN_MESSAGE = "I couldn't find this in your documents."
 # §9 — the literal Tier 3 disclaimer. Also the UI's signal that an answer is ungrounded,
 # since `Answer` carries no tier field.
 TIER3_DISCLAIMER = "General knowledge — not from your materials. May not match your syllabus."
+
+# BLOCKERS #21 - the reminder names the language, so a script code is not enough. Only
+# the three corpus languages are named; anything else gets no reminder rather than a
+# guess, since telling a model to "answer in und" is worse than saying nothing.
+LANGUAGE_NAMES: dict[str, str] = {
+    "en": "English",
+    "zh": "Chinese",
+    "ta": "Tamil",
+}
 
 SYSTEM_INSTRUCTION = f"""\
 You are a study assistant. Answer using ONLY the numbered context blocks provided.
@@ -96,17 +105,31 @@ def format_context(hits: Sequence[Retrieved], *, doc_names: Mapping[str, str] | 
     )
 
 
+def language_reminder_for(question: str) -> str:
+    """`(Answer in X.)` for a question whose language we can name, else "" (BLOCKERS #21).
+
+    Placed between the context and `Answer:` by `build_prompt`. The position is the whole
+    point: `SYSTEM_INSTRUCTION` rule 1 already says this thousands of tokens earlier, and
+    that distance is exactly what a weaker instruction-follower loses it over.
+    """
+    name = LANGUAGE_NAMES.get(lang_for_script(detect_script(question)))
+    return f"(Answer in {name}.)" if name else ""
+
+
 def build_prompt(
     question: str,
     hits: Sequence[Retrieved],
     *,
     doc_names: Mapping[str, str] | None = None,
     system: str = SYSTEM_INSTRUCTION,
+    language_reminder: bool = False,
 ) -> str:
     """Tier 1 prompt. `hits` must already be sliced to `cfg.retrieve.n_context`."""
     q = _check_question(question)
     context = format_context(hits, doc_names=doc_names)
-    return f"{system}\n\nContext:\n{context}\n\nQuestion: {q}\nAnswer:"
+    tail = language_reminder_for(q) if language_reminder else ""
+    tail = f"{tail}\n" if tail else ""
+    return f"{system}\n\nContext:\n{context}\n\nQuestion: {q}\n{tail}Answer:"
 
 
 def estimate_tokens(text: str) -> int:
@@ -150,6 +173,7 @@ def fit_context(
     count_tokens: Callable[[str], int] = estimate_tokens,
     doc_names: Mapping[str, str] | None = None,
     system: str = SYSTEM_INSTRUCTION,
+    language_reminder: bool = False,
 ) -> FittedContext:
     """Longest prefix of `hits` whose Tier 1 prompt fits `max_prompt_tokens` (BLOCKERS #11).
 
@@ -166,7 +190,13 @@ def fit_context(
     checked = _check_hits(hits)
     kept = checked
     while True:
-        prompt = build_prompt(question, kept, doc_names=doc_names, system=system)
+        prompt = build_prompt(
+            question,
+            kept,
+            doc_names=doc_names,
+            system=system,
+            language_reminder=language_reminder,
+        )
         tokens = count_tokens(prompt)
         if tokens <= max_prompt_tokens or len(kept) == 1:
             return FittedContext(

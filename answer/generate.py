@@ -518,6 +518,7 @@ class AnswerStream:
             max_prompt_tokens=budget,
             count_tokens=getattr(self._generator, "count_tokens", estimate_tokens),
             doc_names=self._doc_names,
+            language_reminder=self._cfg.generate.language_reminder,
         )
         if fitted.dropped:
             log.info(

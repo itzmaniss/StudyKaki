@@ -112,6 +112,14 @@ class GenerateConfig(_Strict):
     #: at ~1.1 chars/token against English's 2.33, so five Tamil chunks are ~10.4k tokens where
     #: five English ones are ~4.7k. Without a budget the whole Tamil corpus is unanswerable.
     max_prompt_tokens: int = Field(default=6000, gt=0)
+    #: Restate the question's language between the context and "Answer:" (BLOCKERS #21).
+    #: The rule is already in `SYSTEM_INSTRUCTION`, but a system block sits thousands of
+    #: tokens before generation starts, and a weaker instruction-follower loses it: gemma-4
+    #: answered 9 of 12 English cross-lingual questions in the *document's* language. The
+    #: reminder takes that to 12/12. qwen3-4b scores 1.000 without it, so this is off by
+    #: default for any generator that does not need it — it is a per-model trade, and every
+    #: prompt change re-baselines every eval number.
+    language_reminder: bool = False
 
 
 class PathsConfig(_Strict):
