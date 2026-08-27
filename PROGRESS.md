@@ -717,3 +717,38 @@ unmodified prompt, so the prompt wording is sufficient and this is Gemma instruc
 Not applied to the shared prompt — it would break comparability with every existing run and it
 fixes the model the sweep says not to ship. Patch and before/after recorded in #21.
 Verified: uv run pytest -q exit 0, ruff clean, uv lock --check clean.
+
+## 2026-08-27 20:13 — eval: the generator comparison, re-run like-for-like (corrects 19:34)
+The 19:34 entry compared a Gemma sweep from 2026-08-26 against a Qwen3 sweep from 2026-08-27.
+Those ran on **different machines with different embedder devices** — gemma's embedder fell back
+to CPU on a box enumerating `['CPU','GPU.0','GPU.1']`, qwen's ran on `GPU.0` on the Core Ultra 7
+255H. Its claim of "byte-identical retrieval" was wrong: MRR@10 differed (0.742 vs 0.743), which
+is the #18 drift. Re-ran the Gemma sweep on this machine so both share a footing.
+
+Retrieval now genuinely identical across the pair (recall@1 0.633, recall@5 0.898,
+recall@10 0.980, MRR@10 0.743), embedder on GPU.0 in both:
+
+|                    | gemma-4-e2b int4 | qwen3-4b int4 |
+|--------------------|------------------|---------------|
+| groundedness       | 0.781            | **0.935**     |
+| en                 | 0.734 (lang 0.688) | **0.935** (1.000) |
+| ta                 | 0.667            | **1.000**     |
+| zh                 | **1.000**        | 0.900         |
+| peak RSS           | 8.44 GB          | 8.52 GB       |
+| median generate    | **13.7 s**       | 29.5 s        |
+| worst generate     | **26.0 s**       | 83.5 s        |
+| IR on disk         | 4.3 GB           | **2.5 GB**    |
+
+**Gemma's quality numbers reproduced exactly** across the two machines, so the quality gap is a
+property of the model, not of the hardware. Two conclusions the 19:34 entry could not support:
+
+1. **Gemma does not fix BLOCKERS #14.** Peak RSS differs by 0.9%. It also costs 1.7x the disk —
+   the `hf_vlm` export ships 2.35 GB of per-layer embeddings and a 169 MB vision tower this
+   project never uses, so "E2B" is ~2B *effective* parameters, not a 2B footprint.
+2. **The speed win is larger than first measured** — 2.2x median, 3.2x worst case.
+
+Run: data/eval/runs/20260827T121258Z_dense.parquet (gemma int4, this machine).
+Open: Gemma's English 0.734 is depressed by two measured, non-inherent effects (#21's
+cross-lingual language bug, and paraphrased refusals scoring 0.0 instead of being excluded).
+Its groundedness *with* the #21 reminder applied is unknown and is the number that should decide
+generator choice.
