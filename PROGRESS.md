@@ -752,3 +752,31 @@ Open: Gemma's English 0.734 is depressed by two measured, non-inherent effects (
 cross-lingual language bug, and paraphrased refusals scoring 0.0 instead of being excluded).
 Its groundedness *with* the #21 reminder applied is unknown and is the number that should decide
 generator choice.
+
+## 2026-08-27 20:40 — config: generator is a documented choice, fastest is the default
+Done: both generators described in `configs/base.yaml` with measured numbers, so switching is a
+two-line edit against evidence. New `generate.language_reminder` key (schema default false,
+true in base.yaml) restates the question's language between the context and "Answer:".
+
+Swept the new default end to end — a default config without an eval number is exactly what §0.5
+forbids:
+
+| | gemma (no reminder) | **gemma + reminder (ships)** | qwen3-4b |
+|---|---|---|---|
+| groundedness | 0.781 | **0.796** | 0.935 |
+| en | 0.734 (lang 0.688) | **0.758 (lang 1.000)** | 0.935 (1.000) |
+| ta | 0.667 | **0.833** | 1.000 |
+| zh | 1.000 | 0.900 | 0.900 |
+| median generate | 13.7 s | **12.6 s** | 29.5 s |
+| peak RSS | 8.44 GB | 8.46 GB | 8.52 GB |
+
+The reminder closes BLOCKERS #21 completely (`lang_match 1.000` on all three languages, from
+0.688 on English) and lifts Tamil 0.667 -> 0.833, while being *faster* — answering in the wrong
+language costs tokens. Chinese fell 1.000 -> 0.900, one answer's worth on 10 scored.
+
+**The trade is still real and is recorded in base.yaml:** the default is 2.3x faster and 0.796
+against qwen3-4b's 0.935. Retrieval identical across every run in this comparison
+(recall@5 0.898, MRR@10 0.743). Run: data/eval/runs/20260827T124001Z_dense.parquet.
+Verified: ruff clean, uv lock --check clean, pytest green except the two pre-existing #22
+registry failures.
+Commits: 65d5a54, and this one.

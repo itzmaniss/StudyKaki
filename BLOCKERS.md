@@ -1552,8 +1552,22 @@ shared by both generators and would break comparability with every existing eval
 fixes the model the sweep says not to ship. If Gemma 4 is ever chosen, apply it — the
 before/after number (3/12 -> 12/12) already exists, which is what §0.5 asks for.
 
-**Need a decision:** apply the reminder to the shared prompt now (and re-baseline), or leave
-it recorded here until a generator change makes it matter.
+**Resolved 2026-08-27** (65d5a54 and follow-up). The generator change arrived: gemma-4-e2b-it
+is now the `configs/base.yaml` default for speed, which made this a shipping bug rather than a
+note. Implemented as `generate.language_reminder`, a config key rather than a prompt edit — the
+schema default is `false`, base.yaml sets it `true`, so qwen3-4b's numbers stay comparable and
+each generator carries its own trade.
+
+Swept end to end rather than inferred from the 12-question A/B. `lang_match` goes 0.688 -> 1.000
+on English and holds 1.000 on Tamil and Chinese; groundedness 0.781 -> 0.796 overall and
+0.667 -> 0.833 on Tamil; median generate 13.7 s -> 12.6 s, i.e. the fix is *free* on latency
+because answering in the wrong language costs tokens. Chinese slipped 1.000 -> 0.900, one answer
+on 10 scored. Run: data/eval/runs/20260827T124001Z_dense.parquet.
+
+Still open, and deliberately not folded in here: the reminder has **not** been measured against
+qwen3-4b. It scores `lang_match 1.000` without it, so there is nothing to fix, and enabling it
+there would re-baseline a number nothing else needs — but "harmless for qwen3" is an assumption,
+not a measurement.
 
 ---
 
