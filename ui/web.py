@@ -40,11 +40,18 @@ log = structlog.get_logger("ui.web")
 
 PAGE = Path(__file__).resolve().parent / "index.html"
 
-#: Shown as clickable chips so a demo does not begin with someone typing.
+#: Shown as clickable chips so a demo does not begin with someone typing. These are the
+#: first thing a presenter clicks, so every one must clear `tau` on the shipped config — a
+#: demo opening with "I couldn't find this in your documents" is worse than no demo. Two of
+#: the previous three abstained: "Who formalised boolean algebra?" tops out at 0.445 against
+#: tau 0.45 (BLOCKERS #18), and the shorter Tamil phrasing at 0.365. All three below are
+#: verbatim from eval/golden.jsonl — so each is a question with a measured answer, not a
+#: hand-written one — and score 0.647 / 0.608 / 0.781, one per corpus language.
+#: Re-check with `retrieve.dense` after any change to the embedder, chunking or tau.
 EXAMPLES = (
-    "Who formalised boolean algebra?",
-    "ஜார்ஜ் பூல் யார்?",
-    "什么是光合作用?",
+    "In which year did the personal computer first appear?",
+    "பூலியன் இயற்கணிதத்தை உருவாக்கியவர் யார்?",
+    "我国IPv6地址数量是多少？",
 )
 
 #: Enough of the cited block to recognise the answer in it, short enough not to bury the page.

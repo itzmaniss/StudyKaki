@@ -138,7 +138,11 @@ def test_the_server_module_imports_no_web_framework():
 
 
 def test_root_serves_the_page(server):
-    assert "Study Assistant" in get(server + "/")
+    page = get(server + "/")
+    assert "<title>StudyKaki</title>" in page
+    # §0.3's claim is the strongest thing the page says, so it is asserted rather than trusted
+    # to survive a redesign.
+    assert "100% offline" in page
 
 
 def test_meta_reports_the_corpus(server):
