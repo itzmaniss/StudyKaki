@@ -1630,3 +1630,72 @@ open, and guessing here would paper over the same ambiguity in a second place.
 
 Blocked file: `models/registry.py:_compile_with_fallback` / `_execution_device`,
 `tests/test_registry.py:314,326`.
+
+---
+
+## 23. OCR text is not reproducible across execution configuration
+
+The recogniser's output depends on *how* it was executed, not only on the pixels and the
+weights. Two independent cases, both measured on `std12_cs_vol1_ta.pdf`:
+
+**Batch composition.** `PaddleTextRecognizer` sorts crops by aspect ratio and pads each batch
+to its widest member. The same crop therefore decodes differently depending on what else
+shared its batch. Removing a redundant second recognition pass (see below) left 266 of 284
+blocks byte-identical and changed 18 — all `taml`, all spacing or a dropped character:
+
+```
+base: 'பள்ளிக் கல்வி  இயக்க்கம், தமிழ்நாடு'   ->  'பள்ளிக் கல்வி இயக்க்கம், தமிழ்நாடு'
+base: 'முனைவர் சங்கர நாராயணன் வி,'          ->  'முனைவர் ங்கர நாராயணன் வி,'
+```
+
+**Thread count.** Changing `INFERENCE_NUM_THREADS` or setting `PERFORMANCE_HINT=THROUGHPUT`
+also changes the text — different reduction order in the kernels flips borderline CTC argmax
+decisions. Measured at 4x3, 6x2 and 10x1 threads: every configuration differed from the
+default, none by much.
+
+Why it matters: `_page_hash` keys the OCR cache on `(doc_id, page, dpi, shape, engine
+fingerprint, params)`. None of those capture batch shape or thread count, so a cache entry
+written under one configuration is served under another as if it were the same computation.
+`doc_id` is the sha256 of the file and gold labels are keyed on it (§5), so the corpus is
+pinned but its OCR is not.
+
+Not currently a live bug: `--ocr-workers` leaves per-inference configuration untouched and
+was verified to produce byte-identical output at 2/4/8 workers. It becomes one the moment
+anyone tunes threading to chase throughput.
+
+Tried: nothing yet — recording it before it is load-bearing.
+Need: a decision on whether OCR output is required to be reproducible. If yes, the batch
+padding width belongs in the cache key (and batches should be padded to a fixed bucket
+rather than to the widest member). If no, that should be written down, because eval numbers
+are compared across runs and machines.
+Blocked file: `ingest/ocr_paddle.py` (batching), `ingest/ocr.py:_page_hash` (cache key).
+
+## 24. A redundant recognition pass costs 39% of OCR, but removing it moves Tamil text
+
+`OcrEngine._recognize` picks a leading head from `script_hint`, then re-routes any line whose
+text detects as a script with a dedicated head. The guard reads:
+
+```python
+if head is not None and head is not self._primary:
+```
+
+`self._primary` is the *default* head, not the head that just ran. Under `script_hint="taml"`
+the Tamil head leads, so Tamil lines route straight back to the head that already read them.
+Measured on 6 Tamil pages: **495 recognition passes for 294 detected lines, 1.68x.**
+
+Recognition is 84% of OCR cost (0.55 s of 0.64 s/page). Comparing against `primary` and also
+skipping the default head — routing a line to the generic reader is a downgrade when a
+dedicated head already read it — gives 299 passes (1.02x) and takes OCR from **0.61 to
+0.37 s/page, a 39% cut**. On the 678 Tamil pages that is roughly 7 min -> 4.2 min.
+
+Block count is unchanged (284). But 18 of 284 blocks (6.3%) come back with different text,
+for the batch-padding reason in #23. The differences are mixed — some spacing improves, one
+loses a character — and they land on Tamil, already the weakest language at `ta 0.833`.
+
+Tried: both guard variants. Comparing only against `primary` also pulls `unknown`-script
+lines into the generic head, which dropped 284 blocks to 273; the two-condition guard is the
+one that holds block count.
+Need: an eval number. Re-index and run `eval/run.py --groundedness` per language before this
+ships — §0.5 says a 39% speedup does not justify itself if Tamil groundedness moves.
+Held in `git stash` as "ocr: redundant-recognition fix (pending eval)" rather than committed.
+Blocked file: `ingest/ocr.py:_recognize`.

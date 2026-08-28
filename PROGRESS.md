@@ -847,3 +847,59 @@ Output is `data/eval/charts/`, which is gitignored with the rest of `data/` — 
 the committed artefact, not the images.
 
 Verified: ruff clean, uv lock --check clean, pytest 868 passed / 8 skipped.
+
+## 2026-08-28 11:40 — ingest: where the time goes, a locale bug, and parallel OCR
+Measured the ingest profile rather than guessing at it. On this M4 Pro:
+
+| stage | cost |
+|---|---|
+| pymupdf load, 232-page doc | 3.5 s |
+| page render @200 dpi | 0.01 s/page |
+| OCR detection | 0.10 s/page (16% of OCR) |
+| OCR recognition | ~0.5 s/page (84% of OCR) |
+
+1939 of 2617 pages skip OCR on their text layer. The other **678 are exactly the three Tamil
+documents** — their text layers are legacy-encoded mojibake, so `load.py` rejects them
+(BLOCKERS #5) and every page is rasterised. That is ~7 min of OCR and effectively the whole
+ingest wall time. Recognition, not detection, is the cost centre.
+
+**Fixed a live bug found on the way (`6048288`).** `load_charset` and `_read_yaml` called
+`read_text()` with no encoding, so the locale decided. The PP-OCRv5 dictionaries are UTF-8 —
+18384 CJK entries, 514 Tamil — so under a C/POSIX or cp1252 locale the read raises
+UnicodeDecodeError, gets swallowed by the JSONDecodeError/ValueError handler, and surfaces as
+"no recognition character dictionary — re-run scripts.setup" for a file that is present and
+correct. Invisible on a UTF-8 dev machine, fatal on one without; same class as `bb8f565`.
+`core/config.py` had it too. The test simulates a C locale rather than asserting on the call
+signature — verified it fails on the old code and passes on the new.
+
+**Parallel OCR (`4744377`), default off.** `ocr_pages` gained `workers` and `engine_factory`.
+Pages are independent and results are collected in input order, so output is identical to
+serial — asserted at 2/4/8 workers on stubs and verified byte-for-byte on 16 real Tamil
+pages. One engine per thread, because a `CompiledModel` carries a single implicit
+InferRequest. Pages are submitted in windows of `2*workers` so a lazy `render_pages` is not
+materialised whole (~12 MB per page raster). `workers` is deliberately not in `OcrParams` and
+never reaches the cache key.
+
+**It only bought 1.10-1.39x here, and that is probably an arm64 result.** One inference under
+the default LATENCY hint already saturates all 14 cores, so extra threads contend rather than
+add. Two signals say this is ARM, not the workload: `PERFORMANCE_HINT=THROUGHPUT` made it
+*3x worse* (1.14 s/page vs 0.39) where on Intel it is the tuned path for small models; and
+capping `INFERENCE_NUM_THREADS` changed the OCR text, suggesting a less-travelled kernel
+path. PP-OCR mobile is small and low-arithmetic-intensity — the case where multi-stream
+should win. `--ocr-workers` exists so the number can be taken on the 255H instead of assumed
+from here.
+
+Two findings recorded rather than acted on: **BLOCKERS #23** (OCR text is not reproducible
+across batch composition or thread count, and the cache key captures neither) and
+**BLOCKERS #24** (a redundant recognition pass worth 39% of OCR, held in `git stash` because
+removing it moves 6.3% of Tamil blocks and needs an eval number first).
+
+Not yet tried, and likely the largest win: **OCR on the iGPU.** `base.yaml` already asks for
+`device: GPU` on `ocr_det`/`ocr_rec`; this machine has no GPU plugin so it falls back to CPU
+and the path is untested. The structural win is larger still — decoding the legacy Tamil
+encodings instead of OCR'ing those 678 pages would take the stage to near zero.
+
+Verified: ruff clean, uv lock --check clean, pytest **875 passed, 8 skipped** (was 869; +6
+covering parallel/serial equivalence, page ordering, the missing-factory fallback and a
+nonsense worker count).
+Commits: 6048288, 4744377.
