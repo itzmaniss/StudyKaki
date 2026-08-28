@@ -319,7 +319,11 @@ class OcrEngine:
         routed: dict[str, list[int]] = {}
         for i, result in enumerate(results):
             head = self.recognizers.get(detect_script(result.text))
-            if head is not None and head is not self._primary:
+            # Skip the head that just ran — under a script_hint it is not `self._primary`,
+            # so re-reading its own output was a second pass for the same answer (measured
+            # 1.68x passes per line on a Tamil page). Skip the default head too: routing a
+            # line to it is a downgrade when a dedicated head already read it.
+            if head is not None and head is not primary and head is not self._primary:
                 routed.setdefault(head.script, []).append(i)
         for script, index in routed.items():
             head = self.recognizers[script]
