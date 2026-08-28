@@ -181,6 +181,57 @@ def test_reading_order_is_renumbered_across_pages_and_pages_are_preserved():
     assert [b.page for b in blocks] == [1, 1, 2, 2, 3, 3]
 
 
+class TestParallelPages:
+    """`workers` is a throughput knob, so it must not be observable in the output."""
+
+    @staticmethod
+    def _pages(n: int):
+        images, detectors, recognizers = zip(
+            *(build_page(BODY, page=p) for p in range(1, n + 1)), strict=True
+        )
+        return list(images), detectors[0], recognizers[0]
+
+    @pytest.mark.parametrize("workers", [2, 4, 8])
+    def test_parallel_output_is_identical_to_serial(self, workers):
+        images, detector, recognizer = self._pages(9)
+
+        def factory():
+            return OcrEngine(detector, {DEFAULT_SCRIPT: recognizer})
+
+        serial = ocr_pages(images, doc_id=DOC_ID, engine=factory())
+        parallel = ocr_pages(
+            images,
+            doc_id=DOC_ID,
+            engine=factory(),
+            workers=workers,
+            engine_factory=factory,
+        )
+        assert serial == parallel
+
+    def test_pages_stay_in_document_order(self):
+        images, detector, recognizer = self._pages(6)
+
+        def factory():
+            return OcrEngine(detector, {DEFAULT_SCRIPT: recognizer})
+
+        blocks = ocr_pages(
+            images, doc_id=DOC_ID, engine=factory(), workers=4, engine_factory=factory
+        )
+        assert [b.page for b in blocks] == [p for p in range(1, 7) for _ in range(2)]
+        assert [b.reading_order for b in blocks] == list(range(12))
+
+    def test_without_a_factory_it_runs_serially_rather_than_sharing_one_engine(self):
+        images, detector, recognizer = self._pages(4)
+        engine = OcrEngine(detector, {DEFAULT_SCRIPT: recognizer})
+        blocks = ocr_pages(images, doc_id=DOC_ID, engine=engine, workers=4)
+        assert [b.reading_order for b in blocks] == list(range(8))
+
+    def test_a_nonsense_worker_count_is_refused(self):
+        image, engine, _, _ = engine_for(BODY)
+        with pytest.raises(ValueError, match="workers must be >= 1"):
+            ocr_pages([image], doc_id=DOC_ID, engine=engine, workers=0)
+
+
 def test_block_ids_are_page_local_unique_and_deterministic():
     image, engine, _, _ = engine_for(BODY, page=4)
     first = engine.read_page(image, DOC_ID)

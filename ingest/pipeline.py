@@ -157,6 +157,7 @@ class Pipeline:
         batch_size: int = DEFAULT_BATCH_SIZE,
         index_root: str | Path | None = None,
         script_hint: str | None = None,
+        ocr_workers: int = 1,
     ) -> None:
         if dpi <= 0:
             raise ValueError(f"dpi must be positive, got {dpi}")
@@ -173,6 +174,11 @@ class Pipeline:
         # the default charset cannot represent the script: a Tamil page read by the zh+en
         # head is confident nonsense that `detect_script` calls `hans`. See ingest/ocr.py.
         self.script_hint = script_hint
+        if ocr_workers < 1:
+            raise ValueError(f"ocr_workers must be >= 1, got {ocr_workers}")
+        # Not in the cache key and not in OcrParams: how many threads read a page cannot
+        # change what the page says. Measured 1.3x on arm64; Intel is the target.
+        self.ocr_workers = ocr_workers
         self._embedder = (
             embedder if embedder is not None else _LazyEmbedder(cfg, manifest_path=manifest_path)
         )
@@ -187,12 +193,15 @@ class Pipeline:
     def engine(self) -> OcrEngine:
         """The OCR engine, built on first use. A born-digital corpus never builds one."""
         if self._engine is None:
-            from ingest.ocr import build_engine
-
-            self._engine = build_engine(
-                self.cfg, params=self.ocr_params, manifest_path=self.manifest_path
-            )
+            self._engine = self.build_engine()
         return self._engine
+
+    def build_engine(self) -> OcrEngine:
+        """A fresh engine. `ocr_pages` needs one per thread — a `CompiledModel` carries a
+        single implicit InferRequest, so threads cannot share it."""
+        from ingest.ocr import build_engine
+
+        return build_engine(self.cfg, params=self.ocr_params, manifest_path=self.manifest_path)
 
     def ingest_document(
         self, data: bytes, filename: str, script_hint: str | None = None
@@ -216,6 +225,8 @@ class Pipeline:
                     cache=self.cache,
                     config_hash=CONFIG_INDEPENDENT,
                     script_hint=script_hint or self.script_hint,
+                    workers=self.ocr_workers,
+                    engine_factory=self.build_engine,
                 )
             n_blocks = len(blocks)
             span.extra["n_blocks"] = n_blocks
@@ -353,6 +364,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dpi", type=int, default=DEFAULT_OCR_DPI)
     ap.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     ap.add_argument(
+        "--ocr-workers",
+        type=int,
+        default=1,
+        help="OCR pages concurrently. Output is identical either way; this is a throughput "
+        "knob for the target machine, where one inference may not saturate every core",
+    )
+    ap.add_argument(
         "--script-hint",
         default=None,
         help="force one recognition head for every document, overriding the per-file "
@@ -382,6 +400,7 @@ def main(argv: list[str] | None = None) -> int:
         dpi=args.dpi,
         batch_size=args.batch_size,
         script_hint=args.script_hint,
+        ocr_workers=args.ocr_workers,
     )
     print(
         f"{result.n_documents} document(s), {result.n_chunks} chunks "

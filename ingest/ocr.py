@@ -19,8 +19,11 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections.abc import Iterable, Mapping, Sequence
+import threading
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from itertools import islice
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -404,28 +407,98 @@ def ocr_pages(
     cache: StageCache | None = None,
     config_hash: str = "none",
     script_hint: str | None = None,
+    workers: int = 1,
+    engine_factory: Callable[[], OcrEngine] | None = None,
 ) -> list[Block]:
     """Every page of one document, with `reading_order` renumbered document-wide.
 
     `block_id` stays page-local so a cached page survives whatever else is OCR'd with it.
+
+    `workers` > 1 OCRs pages concurrently. Pages are independent and results are collected
+    in input order, so the output is identical to the serial path — verified by test. It is
+    not in `OcrParams` and never reaches the cache key: how many threads read a page cannot
+    change what the page says.
+
+    Each thread needs its own `OcrEngine`; a `CompiledModel` has one implicit InferRequest
+    and concurrent calls would corrupt it. Without `engine_factory` there is nothing to
+    build them from, so the run stays serial rather than racing.
+
+    Measured 1.3x on an M4 Pro, where one inference already saturates every core. Intel is
+    the target and may differ — `--ocr-workers` exists to find out, not because a number
+    from this machine says it helps.
     """
+    if workers < 1:
+        raise ValueError(f"workers must be >= 1, got {workers}")
+    if workers > 1 and engine_factory is None:
+        log.warning("ocr.parallel_needs_factory", workers=workers, hint="running serially")
+        workers = 1
+
     with stage_timer("ocr.document", doc_id) as span:
         blocks: list[Block] = []
         pages = 0
-        for image in images:
+        for page_blocks in _ocr_stream(
+            images,
+            doc_id=doc_id,
+            engine=engine,
+            cache=cache,
+            config_hash=config_hash,
+            script_hint=script_hint,
+            workers=workers,
+            engine_factory=engine_factory,
+        ):
             pages += 1
-            for block in ocr_page(
-                image,
-                doc_id=doc_id,
-                engine=engine,
-                cache=cache,
-                config_hash=config_hash,
-                script_hint=script_hint,
-            ):
+            for block in page_blocks:
                 blocks.append(replace(block, reading_order=len(blocks)))
         span.n_out = len(blocks)
         span.extra["n_pages"] = pages
+        span.extra["workers"] = workers
     return blocks
+
+
+def _ocr_stream(
+    images: Iterable[PageImage],
+    *,
+    doc_id: str,
+    engine: OcrEngine,
+    cache: StageCache | None,
+    config_hash: str,
+    script_hint: str | None,
+    workers: int,
+    engine_factory: Callable[[], OcrEngine] | None,
+) -> Iterator[list[Block]]:
+    """Per-page blocks, in page order, serial or across `workers` threads."""
+
+    def one(image: PageImage, eng: OcrEngine) -> list[Block]:
+        return ocr_page(
+            image,
+            doc_id=doc_id,
+            engine=eng,
+            cache=cache,
+            config_hash=config_hash,
+            script_hint=script_hint,
+        )
+
+    if workers == 1:
+        for image in images:
+            yield one(image, engine)
+        return
+
+    assert engine_factory is not None
+    local = threading.local()
+    spare = [engine]
+
+    def engine_for_thread() -> OcrEngine:
+        if not hasattr(local, "engine"):
+            local.engine = spare.pop() if spare else engine_factory()
+        return local.engine
+
+    pending = iter(images)
+    with ThreadPoolExecutor(workers, thread_name_prefix="ocr") as pool:
+        # A window, not the whole document: `render_pages` is lazy because a full-page RGB
+        # raster is ~12 MB and a 200-page book would not fit in RAM. Submitting everything
+        # would materialise exactly that.
+        while window := list(islice(pending, workers * 2)):
+            yield from pool.map(lambda img: one(img, engine_for_thread()), window)
 
 
 def build_engine(
