@@ -780,3 +780,39 @@ against qwen3-4b's 0.935. Retrieval identical across every run in this compariso
 Verified: ruff clean, uv lock --check clean, pytest green except the two pre-existing #22
 registry failures.
 Commits: 65d5a54, and this one.
+
+## 2026-08-28 01:08 — repo cleanup: merge to main, untrack junk, condense prose, Intel README
+Done: Merged `gemma-4` into `main` — a clean fast-forward, 23 commits, no divergence, so no
+merge commit and no content decisions. `main` is now the checked-out branch at the gemma-4 tip.
+
+Untracked two things that were committed by accident and are now gitignored (both kept on
+disk): `.playwright-mcp/` — a 3.5 MB browser-scratch PDF held via LFS plus an empty page dump —
+and `dev/null/`, four git-lfs hook stubs that a stray `--hooks-path dev/null` wrote as real
+files while the working copies were already installed in `.git/hooks`. 95 tracked files -> 89.
+Also ignored `*.zip`, after a 3.5 GB `Archive.zip` was found sitting untracked in the root.
+
+Condensed the prose across every source file. Long paragraph comments and essay-style module
+docstrings compressed to terse form; no rationale dropped — the measured facts (the 0.288
+mixed-script threshold, the arm64 NNCF `ReduceMin` gap, INT8 softmax drift at 1.026, the
+`f16 -> f32` tokenizer failure, tau's 0.01 window) all survive in shorter sentences. Prose fell
+from 17.0% of the source tree to 14.4% (docstrings 1424 -> 1189 lines, comments 332 -> 248).
+Tests were left alone: at 7.2% their comments are mostly section separators, not noise.
+
+Rewrote `README.md` around the Intel stack, since that is what the entry is judged on. New
+opening section maps every stage to its model, precision, device intent and runtime (OpenVINO
+Runtime / GenAI), then says what each Intel component actually does here — NNCF compressing at
+export time, GenAI's streaming callback, OpenVINO Tokenizers keeping tokenisation in-runtime,
+Optimum Intel supplying the stateful KV-cache export, `.ov_cache` warm starts. Kept the honest
+parts intact: device strings are intent not promise, `bench.py` prints `unavailable` rather
+than a zero, and the limitations list gained the BLOCKERS #11 INT4 prompt-token ceiling.
+
+Verified: `ruff format`, `ruff check --fix`, `pytest` after every batch — 868 passed, 8 skipped
+throughout, unchanged from the pre-cleanup baseline. Behaviour untouched; every edit was to a
+comment, a docstring, `.gitignore` or `README.md`.
+
+**Pending, needs the developer:** `origin/main` is still at 869cdb6 and GitHub's default branch
+is still `gemma-4`. The Bash permission gate blocks `git push` in this environment, so run
+`git push -u origin main` by hand, then flip the default branch in the repo's GitHub settings
+(`gh` is not installed on this machine). `git remote set-head origin -a` resyncs afterwards.
+
+Commits: 1d4d9b2, 5d75704, fd4af10, 961c570, and this one.
