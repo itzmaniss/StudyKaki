@@ -1,24 +1,20 @@
 """Structure-aware chunking — ARCHITECTURE.md §3 `chunk`.
 
-§3 calls this the highest-leverage knob in the system, so the rules it has to obey are worth
-stating plainly:
+The highest-leverage knob in the system, so the rules are explicit:
 
-* **Never split mid-block.** A block is the atom. A block larger than `target_tokens` becomes
-  a chunk on its own rather than being cut in half.
-* **Group by reading order within a heading.** A heading opens a section; every block until the
-  next heading belongs to it. Chunks never straddle a heading, and overlap never crosses one
-  either — carrying the tail of "3.1 Light Reactions" into the first chunk of "3.2 Calvin Cycle"
+* Never split mid-block. A block over `target_tokens` becomes a chunk on its own.
+* Group by reading order within a heading. Chunks never straddle one, and neither does
+  overlap — the tail of "3.1 Light Reactions" in the first chunk of "3.2 Calvin Cycle"
   pollutes both.
-* **Count characters for CJK/Thai**, whitespace tokens elsewhere. A 400-"token" Chinese chunk
-  measured by `str.split()` would be an entire chapter.
-* **`bbox_union` is the true union of member block bboxes and `page_start`/`page_end` span
-  them.** Citations are built from these and §0 non-negotiable 2 says provenance cannot be
-  retrofitted.
+* Count characters for CJK/Thai, whitespace tokens elsewhere. A 400-"token" Chinese chunk
+  measured by `str.split()` would be a whole chapter.
+* `bbox_union` is the true union and `page_start`/`page_end` span it — citations are built
+  from these, and provenance cannot be retrofitted (§0 non-negotiable 2).
 
-`Chunk.text` is exactly the concatenation of its member blocks — nothing else — so
-`token_count` describes what is actually stored and `block_ids` accounts for every character.
-`heading_path` travels alongside for `ingest/embed.py` to prefix if it wants to; prepending it
-here would put text in the chunk that no block can vouch for.
+`Chunk.text` is exactly its member blocks concatenated, so `token_count` describes what is
+stored and `block_ids` accounts for every character. `heading_path` travels alongside for
+`ingest/embed.py` to prefix; prepending it here would put text in the chunk that no block
+can vouch for.
 """
 
 from __future__ import annotations
@@ -41,12 +37,11 @@ STAGE_VERSION = "chunk/2"
 
 BLOCK_SEPARATOR = "\n\n"
 
-# CJK and Thai are not whitespace-delimited; one non-space character is roughly one subword
-# token for the XLM-R style vocabulary BGE-M3 uses.
+# Not whitespace-delimited; one non-space char ≈ one subword token in BGE-M3's vocab.
 CHAR_COUNTED_SCRIPTS = frozenset({"hans", "hant", "jpan", "thai"})
 
-# "3.2 Photosynthesis" -> depth 2. "Chapter 3" has no leading numeral, so it is depth 1 —
-# which is exactly the ["Chapter 3", "3.2 Photosynthesis"] path §2 uses as its example.
+# "3.2 Photosynthesis" -> depth 2; "Chapter 3" has no numeral, so depth 1. That is §2's
+# ["Chapter 3", "3.2 Photosynthesis"] example.
 _NUM_PREFIX_RE = re.compile(r"^\s*(\d+(?:[.\-]\d+)*)\s*[.):]?\s+\S")
 
 
@@ -100,10 +95,9 @@ def _sections(blocks: Sequence[Block]) -> list[_Section]:
 def _is_redundant(section: _Section, following: _Section | None) -> bool:
     """A bare heading whose child section inherits it is not worth its own chunk.
 
-    "Chapter 3" immediately followed by "3.1 Light Reactions" would otherwise index as a
-    two-token chunk that can only ever be a false positive. Its text is not lost: it stays in
-    the `heading_path` of every section beneath it. A trailing bare heading with nothing under
-    it *is* kept, because then the path is the only place the text would survive.
+    "Chapter 3" before "3.1 Light Reactions" would index as a two-token chunk that can only
+    be a false positive. The text survives in the `heading_path` beneath it. A trailing bare
+    heading is kept — nothing inherits it.
     """
     if following is None or any(b.kind != "heading" for b in section.blocks):
         return False
@@ -117,8 +111,8 @@ def _is_redundant(section: _Section, following: _Section | None) -> bool:
 def _overlap_tail(packed: Sequence[Block], budget: int) -> list[Block]:
     """Trailing blocks worth at most `budget` tokens, never the whole chunk.
 
-    Returning everything would make the next chunk a strict superset of this one — the same
-    text embedded twice, and two identical hits at query time.
+    Everything would make the next chunk a superset of this one: same text embedded twice,
+    two identical hits at query time.
     """
     if budget <= 0 or len(packed) < 2:
         return []
@@ -151,10 +145,10 @@ def _pack(blocks: Sequence[Block], params: ChunkConfig) -> list[list[Block]]:
 
 
 def _merge_short(groups: list[list[Block]], min_tokens: int) -> list[list[Block]]:
-    """Fold an undersized chunk back into its predecessor rather than shipping or dropping it.
+    """Fold an undersized chunk into its predecessor rather than ship or drop it.
 
-    Dropping loses content; shipping a 9-token chunk gives the retriever a fragment with no
-    context. Merging keeps every block reachable, at the cost of one slightly oversized chunk.
+    Dropping loses content, shipping a 9-token chunk gives the retriever a contextless
+    fragment. Merging keeps every block reachable for one slightly oversized chunk.
     """
     merged: list[list[Block]] = []
     for group in groups:
@@ -183,19 +177,16 @@ def _dedup(blocks: Iterable[Block]) -> list[Block]:
 def _fold_orphans(
     pairs: list[tuple[list[Block], tuple[str, ...]]], min_tokens: int
 ) -> list[tuple[list[Block], tuple[str, ...]]]:
-    """Second pass, across section boundaries, so `min_tokens` holds for the whole document.
+    """Second pass across section boundaries, so `min_tokens` holds document-wide.
 
-    `_merge_short` can only fold a group into a predecessor *within its own section*. A section
-    that is nothing but one short group therefore has no predecessor and ships whatever its
-    size — and that is the common case, not a corner: most textbooks put the chapter number and
-    the chapter title in two separate heading blocks, which `_sections` reads as two sibling
-    sections, so "CHAPTER 6" indexes as a two-token chunk. Twelve of those in one volume are
-    twelve near-identical vectors that match any query containing the word chapter.
+    `_merge_short` folds only within a section, so a section that is one short group has no
+    predecessor and ships at whatever size. That is the common case: textbooks split the
+    chapter number and title into two heading blocks, which `_sections` reads as siblings,
+    so "CHAPTER 6" indexes as a two-token chunk — twelve per volume, all matching any query
+    containing the word chapter.
 
-    Folding **forward** is what keeps this honest: an orphan section labels what comes after
-    it, so it joins the following chunk and inherits that chunk's heading path. A *trailing*
-    orphan labels nothing and is left alone — `_is_redundant` already decided that case, and
-    its text survives nowhere else.
+    Folds forward: an orphan labels what comes after it, so it joins the following chunk and
+    inherits its heading path. A trailing orphan labels nothing and is left to `_is_redundant`.
     """
     out: list[tuple[list[Block], tuple[str, ...]]] = []
     pending: list[Block] = []
@@ -266,8 +257,8 @@ def chunk_blocks(
 ) -> list[Chunk]:
     """Blocks (already normalised) -> chunks, in reading order, one document at a time.
 
-    `config_hash` defaults to the hash of `params` alone, which is byte-identical to
-    `Config.chunk_config_hash` — retuning `retrieve.tau` must not invalidate this cache.
+    `config_hash` defaults to `params` alone, matching `Config.chunk_config_hash`: retuning
+    `retrieve.tau` must not invalidate this cache.
     """
     doc_ids = {b.doc_id for b in blocks}
     if len(doc_ids) > 1:

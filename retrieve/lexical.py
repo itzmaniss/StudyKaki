@@ -1,27 +1,22 @@
 """BM25 lexical retrieval — ARCHITECTURE.md §10 (V2, hybrid arm).
 
-§10 is explicit that **the work here is per-script tokenization, not BM25**. BM25 Okapi is
-forty lines of well-specified arithmetic; deciding what counts as a term in Tamil, Chinese
-and English at once is the part that decides whether the arm is worth shipping.
+The work here is per-script tokenization, not BM25. Okapi is forty lines of specified
+arithmetic; what counts as a term in Tamil, Chinese and English at once is what decides
+whether the arm ships.
 
-**Why this exists at all.** Dense retrieval embeds meaning and is what makes cross-lingual
-retrieval work, but it is weak exactly where students are precise: formulas, proper nouns,
-section numbers, technical vocabulary. `ஜார்ஜ் பூல்` and "George Boole" are the same person
-to BGE-M3 and different strings to BM25 — and a student searching for `2.4.1` wants the
-string. The two failure modes are close to disjoint, which is why §10 fuses rather than
-replaces.
+Dense embeds meaning and carries cross-lingual retrieval, but it is weak where students are
+precise: formulas, proper nouns, section numbers. `ஜார்ஜ் பூல்` and "George Boole" are one
+person to BGE-M3 and two strings to BM25, and a student searching `2.4.1` wants the string.
+The failure modes are near-disjoint, so §10 fuses rather than replaces.
 
-**Tokenization is driven by the chunk's own recorded script**, not by re-detecting it here.
-`ingest/normalize.py` already decided, `core/schema.Chunk` carries the answer, and a second
-opinion at query time could disagree with the one baked into the index.
+Tokenization follows the chunk's recorded script — `ingest/normalize.py` already decided,
+and a second opinion at query time could disagree with what is baked into the index.
 
-**No BM25 dependency.** `rank_bm25` and `bm25s` both exist; neither is worth a dependency for
-2595 chunks, and §0.3 keeps the runtime surface small. The scoring below is Okapi BM25 with
-the standard `k1=1.5, b=0.75`.
+No BM25 dependency: neither `rank_bm25` nor `bm25s` is worth it for 2595 chunks (§0.3).
+Standard `k1=1.5, b=0.75`.
 
-**Cross-lingual is not this arm's job.** A Tamil query scores ~0 against English chunks here,
-by construction — there is no shared vocabulary. That is not a bug to fix with translation;
-it is why `retrieve/dense.py` exists and why `fusion.py` combines them.
+Cross-lingual is not this arm's job — a Tamil query scores ~0 against English chunks by
+construction. That is what `dense.py` and `fusion.py` are for.
 """
 
 from __future__ import annotations
@@ -45,23 +40,21 @@ log = structlog.get_logger("retrieve.lexical")
 BM25_K1 = 1.5
 BM25_B = 0.75
 
-#: Scripts that do not delimit words with whitespace. §10 names jieba (zh), fugashi (ja) and
-#: pythainlp (th); none is a hard dependency here — see `_segment`.
+#: Non-whitespace-delimited scripts. §10 names jieba/fugashi/pythainlp; none is a hard
+#: dependency — see `_segment`.
 NON_SEGMENTING_SCRIPTS = frozenset({"hans", "hant", "han", "jpan", "kana", "kore", "hang", "thai"})
 
-#: Punctuation stripped from token edges. Internal dots survive so "2.4.1" stays one term.
-#: Do NOT switch this to a `\w`-based regex: `\w` excludes combining marks (category Mn), so
-#: Tamil words shatter at every vowel sign — ஜார்ஜ் becomes ['ஜ','ர','ஜ'].
+#: Stripped from token edges; internal dots survive so "2.4.1" stays one term. Not a
+#: `\w` regex — `\w` drops combining marks, shattering ஜார்ஜ் into ['ஜ','ர','ஜ'].
 _EDGE_PUNCT = " \t\n\r.,;:!?()[]{}<>\"'“”‘’«»—–-_/\\|@#$%^&*+=~`…।॥"
 
 
 def _segment_cjk(text: str) -> list[str]:
-    """Segment a non-whitespace script, preferring a real segmenter when one is installed.
+    """Segment a non-whitespace script, preferring a real segmenter if installed.
 
-    Character bigrams are the fallback, not a placeholder: for BM25 over Chinese they are a
-    long-standing standard and land close to a dictionary segmenter, because a two-character
-    window captures most of the language's compounds. jieba would be better and §10 names it,
-    but the corpus must remain searchable on a machine that does not have it.
+    Character bigrams are the fallback, not a placeholder: a standard choice for BM25 over
+    Chinese that lands close to a dictionary segmenter, since a two-character window catches
+    most compounds. jieba is better, but the corpus must stay searchable without it.
     """
     try:
         import jieba
@@ -76,8 +69,8 @@ def _segment_cjk(text: str) -> list[str]:
 def tokenize(text: str, script: str) -> list[str]:
     """Terms for `text`, segmented according to `script` (§10).
 
-    Casefolded rather than lowercased: casefold is the Unicode-correct operation and differs
-    for scripts this corpus will meet. Tamil and Devanagari have no case and are unaffected.
+    Casefolded, not lowercased — the Unicode-correct operation, and it differs for scripts
+    this corpus meets. Tamil and Devanagari have no case.
     """
     if not text:
         return []
@@ -87,10 +80,10 @@ def tokenize(text: str, script: str) -> list[str]:
 
 
 class BM25Index:
-    """Okapi BM25 over a fixed corpus, addressed by row so it aligns with `chunks.parquet`.
+    """Okapi BM25 over a fixed corpus, addressed by row to align with `chunks.parquet`.
 
-    Row `i` here is row `i` of the dense index — the same join that `vectors.npy` relies on
-    (`retrieve/dense.py`), so a chunk's dense and lexical scores always describe one chunk.
+    Row `i` is row `i` of the dense index — the same join `vectors.npy` relies on, so both
+    scores always describe one chunk.
     """
 
     def __init__(
@@ -107,8 +100,7 @@ class BM25Index:
         self.doc_len = np.asarray([len(d) for d in documents], dtype=np.float32)
         self.avg_len = float(self.doc_len.mean()) if self.n_docs else 0.0
 
-        # term -> (rows, term frequencies). Two parallel arrays rather than a list of pairs:
-        # scoring a query is then pure numpy scatter-add per term.
+        # term -> (rows, tfs). Parallel arrays, so scoring is numpy scatter-add per term.
         self.postings: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         raw: dict[str, list[tuple[int, int]]] = {}
         for row, terms in enumerate(documents):
@@ -141,11 +133,10 @@ class BM25Index:
 
 
 class LexicalRetriever:
-    """Satisfies `retrieve.retriever.Retriever` over BM25 (§10).
+    """`retrieve.retriever.Retriever` over BM25 (§10).
 
-    Built from the same index directory as `DenseRetriever` so the two arms are guaranteed to
-    be ranking the same corpus — `fusion.py` deduplicates on `chunk_id`, which is only sound
-    if both arms saw the same chunks.
+    Same index directory as `DenseRetriever`, so both arms rank the same corpus —
+    `fusion.py` dedups on `chunk_id`, which is only sound if they saw the same chunks.
     """
 
     @classmethod
@@ -177,9 +168,8 @@ class LexicalRetriever:
     def retrieve(self, query: str, k: int) -> list[Retrieved]:
         """Top-`k` chunks by BM25, rank 1 = best (§4).
 
-        Rows scoring exactly 0.0 share no term with the query and are dropped rather than
-        padded out to `k`: an unmatched chunk is not a weak match, and passing it to RRF would
-        hand it rank-based credit it never earned.
+        Rows at exactly 0.0 share no term with the query and are dropped, not padded to `k`:
+        an unmatched chunk is not a weak match, and RRF would give it unearned rank credit.
         """
         if k < 1:
             raise ValueError(f"k must be >= 1, got {k}")

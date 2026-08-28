@@ -33,9 +33,9 @@ GOLDEN = Path(__file__).resolve().parent / "golden.jsonl"
 
 
 class RandomRetriever:
-    """Baseline floor. Samples from a fixed chunk pool; scores are noise.
+    """Baseline floor. Samples a fixed chunk pool; scores are noise.
 
-    Any real retriever that cannot beat this is broken, not merely weak.
+    A real retriever that cannot beat this is broken, not merely weak.
     """
 
     def __init__(self, pool: list[Chunk], seed: int = 0) -> None:
@@ -58,16 +58,15 @@ class RandomRetriever:
 class GenerationOutcome:
     """What one generated answer tells us, beyond whether its citations were real.
 
-    `groundedness` is `None` for an abstention, which is why the other two fields exist:
-    a `None` on its own cannot distinguish "no generator was run" from "the model declined",
-    and BLOCKERS #17 is precisely a case where those two were conflated and six Tamil
-    failures became structurally invisible in the headline average.
+    `groundedness` is `None` for an abstention, so the other fields exist to separate "no
+    generator ran" from "the model declined" — conflating those hid six Tamil failures in
+    the headline average (BLOCKERS #17).
     """
 
     groundedness: float | None
     model_abstained: bool
-    #: `detect_script(answer) == detect_script(question)`. `None` when there is no answer to
-    #: score (abstention) or nothing with letters in it to detect.
+    #: `detect_script(answer) == detect_script(question)`. `None` on abstention, or when
+    #: there are no letters to detect.
     answer_lang_match: bool | None
 
 
@@ -75,9 +74,8 @@ class GenerationOutcome:
 class LangBreakdown:
     """One language's slice of the run (BLOCKERS #17).
 
-    The pooled means hide a language that fails completely — 41 healthy en/zh rows drowned
-    6 Tamil zeros and every headline number still looked fine. Nothing about that is
-    specific to Tamil; it is what pooling does to any minority slice.
+    Pooled means hide a language that fails outright: 41 healthy en/zh rows drowned 6 Tamil
+    zeros and every headline number looked fine. That is what pooling does to any minority.
     """
 
     lang: str
@@ -188,18 +186,17 @@ def evaluate(
 ) -> tuple[EvalResult, pl.DataFrame]:
     """Retrieval metrics always; groundedness only when a `generator` is supplied.
 
-    Generation is orders of magnitude slower than retrieval — a 4B model on CPU over sixty
-    questions is minutes, not seconds — so the groundedness column stays `n/a` unless the
-    caller has explicitly paid for it (`--groundedness`). Retrieval numbers are identical
-    either way: the generator never touches `hits`.
+    A 4B model on CPU over sixty questions is minutes, not seconds, so the column stays
+    `n/a` unless the caller paid for it (`--groundedness`). Retrieval numbers are identical
+    either way — the generator never touches `hits`.
     """
     k = cfg.retrieve.k
     tau = cfg.retrieve.tau
     rows = []
 
     for n, gold in enumerate(golden, start=1):
-        # §5 tracks peak RSS, and a generative sweep is where it actually bites: a run that
-        # dies without a traceback leaves this as the only evidence of why.
+        # §5 peak RSS. A generative sweep that dies without a traceback leaves this as
+        # the only evidence of why.
         if n % 5 == 0 or n == 1:
             log.info(
                 "eval.progress",
@@ -219,16 +216,15 @@ def evaluate(
                 "doc_id": gold.doc_id,
                 "gold_pages": gold.gold_pages,
                 "answerable": answerable,
-                # `abstained` is the *retrieval* gate only — it is what tau controls, and it
-                # is what abstain_precision is scored against. A model that refuses on
-                # context retrieval accepted is `model_abstained`, a different failure with
-                # a different fix (BLOCKERS #17).
+                # Retrieval gate only — what tau controls and what abstain_precision
+                # scores. A model refusing accepted context is `model_abstained`, a
+                # different failure with a different fix (BLOCKERS #17).
                 "abstained": abstained,
                 "model_abstained": outcome.model_abstained if generator is not None else None,
                 "answer_lang_match": outcome.answer_lang_match,
                 "top_score": hits[0].score if hits else 0.0,
-                # Retrieval quality is scored on what was retrieved, independent of the
-                # abstain decision — otherwise tau tuning silently moves recall.
+                # Scored on what was retrieved, not on the abstain decision — otherwise
+                # tau tuning silently moves recall.
                 "recall@1": recall_at(hits, gold, 1) if answerable else None,
                 "recall@5": recall_at(hits, gold, 5) if answerable else None,
                 "recall@10": recall_at(hits, gold, 10) if answerable else None,
@@ -241,10 +237,9 @@ def evaluate(
     ans = [r for r in rows if r["answerable"]]
     abstained_rows = [r for r in rows if r["abstained"]]
 
-    # Of everything we declined to answer, how much *should* have been declined. None, not
-    # 1.0, when nothing was declined: a system that answers everything has not achieved
-    # perfect abstain precision, it has abstained zero times, and printing 1.000 for that
-    # reads as the strongest possible score for the weakest possible behaviour (§0.6).
+    # Of what we declined, how much should have been. None, not 1.0, when nothing was:
+    # answering everything is zero abstentions, and 1.000 would read as the strongest
+    # score for the weakest behaviour (§0.6).
     abstain_precision = (
         mean([1.0 if not r["answerable"] else 0.0 for r in abstained_rows])
         if abstained_rows
@@ -302,10 +297,9 @@ def _generation_outcome(
 ) -> GenerationOutcome:
     """One generated answer, scored on its citations and on the language it came back in.
 
-    `groundedness` is None for an abstention rather than 0.0 — declining to answer makes no
-    claim, so it belongs out of the average entirely (see `eval.metrics.groundedness`). What
-    BLOCKERS #17 showed is that dropping it there and recording nothing else makes the
-    refusal itself unobservable, so the abstention is now *counted* on its way out.
+    `groundedness` is None, not 0.0, for an abstention — no claim is made, so it stays out
+    of the average. BLOCKERS #17: dropping it without counting made the refusal itself
+    unobservable, so abstentions are now counted on the way out.
     """
     if generator is None:
         return GenerationOutcome(groundedness=None, model_abstained=False, answer_lang_match=None)
@@ -313,10 +307,9 @@ def _generation_outcome(
 
     result = generate_answer(question, generator=generator, cfg=cfg, hits=hits)
     if result.abstained:
-        # Retrieval-gated abstentions never reached the model, so they are not the model's
-        # refusal. `retrieval_abstained` is the caller's own gate decision, reused rather
-        # than recomputed: `abstain_score` reads the retriever's arm, and recomputing it
-        # without that retriever would silently score a reranked run against dense scores.
+        # Retrieval-gated abstentions never reached the model. Reuse the caller's gate
+        # decision rather than recompute — `abstain_score` reads the retriever's arm, and
+        # recomputing without it would score a reranked run against dense scores.
         return GenerationOutcome(
             groundedness=None,
             model_abstained=not retrieval_abstained,
@@ -332,9 +325,8 @@ def _generation_outcome(
 def _lang_matches(question: str, answer: str) -> bool | None:
     """§4's "answer in the language of the question", as a number.
 
-    `ingest/normalize.py`'s detector is coarse — script, not language (§11 puts real language
-    ID out of scope) — which is exactly enough here: Tamil answered in English is a script
-    change, and that is the failure mode #17 found.
+    The detector is coarse — script, not language (§11) — which is enough: Tamil answered
+    in English is a script change, and that is the failure #17 found.
     """
     q_script, a_script = detect_script(question), detect_script(answer)
     if "unknown" in (q_script, a_script):
@@ -343,10 +335,9 @@ def _lang_matches(question: str, answer: str) -> bool | None:
 
 
 def _pool_from_golden(golden: list[GoldQuestion], seed: int = 0) -> list[Chunk]:
-    """Synthetic corpus so the harness is exercisable before any real index exists.
+    """Synthetic corpus so the harness runs before any real index exists.
 
-    Includes every gold page plus decoys, so a random retriever scores above zero but
-    far below anything real.
+    Every gold page plus decoys, so random scores above zero but far below anything real.
     """
     rng = random.Random(seed)
     pool: list[Chunk] = []
@@ -386,9 +377,8 @@ def build_retriever(
 ) -> Retriever:
     """`random` needs no index and no model; `dense` needs both.
 
-    Imported lazily so the random baseline keeps working on a machine with no IR on disk —
-    that baseline is what proves the harness itself is sound (§5), and it must never depend
-    on the thing it exists to measure.
+    Lazy import so the baseline runs with no IR on disk — it proves the harness is sound
+    (§5), so it must not depend on what it exists to measure.
     """
     if name == "random":
         return RandomRetriever(_pool_from_golden(golden, seed), seed)
@@ -427,9 +417,8 @@ def main(argv: list[str] | None = None) -> int:
 
     result, df = evaluate(retriever, golden, cfg, label=args.retriever, generator=generator)
     print(result.as_table())
-    # Always, not only under --groundedness: the pooled row is what hid six dead Tamil
-    # questions behind a healthy-looking 0.844 (BLOCKERS #17), and that is not a property of
-    # the generation column — recall pools the same way.
+    # Always, not only under --groundedness: the pooled row hid six dead Tamil questions
+    # behind 0.844 (BLOCKERS #17), and recall pools the same way.
     print(f"\nby language:\n{result.as_lang_table()}")
     if args.retriever == "random":
         print("\n^ random baseline — these numbers are meaningless by design (§5).")

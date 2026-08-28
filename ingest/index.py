@@ -1,26 +1,18 @@
-"""Flat float32 index writer — ARCHITECTURE.md §3 `index`, §3.1, §0.1 storage layout.
+"""Flat float32 index writer — ARCHITECTURE.md §3 `index`, §3.1, §0.1.
 
     chunks + vectors -> data/index/<index_id>/{chunks.parquet, vectors.npy, index_manifest.json}
 
-**Flat and exact (§3).** At student-corpus scale a full scan is fast enough, so there is no
-ANN structure here and no recall to apologise for. HNSW only if `eval/run.py` proves it is
-needed — a graph index that nobody measured is a slower, lossier flat scan.
+Flat and exact (§3): no ANN structure until `eval/run.py` proves one is needed. Vectors are
+`.npy`, never parquet (§0.1) — `retrieve/dense.py` memmaps and scans in blocks, where a
+parquet round-trip would materialise the whole matrix.
 
-**Vectors are `.npy`, never parquet (§0.1).** `retrieve/dense.py` memmaps this file and scans
-it in blocks; a parquet round-trip would materialise the whole matrix in RAM on a machine
-that does not have it spare.
+Row `i` of `vectors.npy` is row `i` of `chunks.parquet`; nothing else joins them. A one-row
+shift does not fail, it cites the wrong page for every answer, so alignment is verified
+against what landed on disk before the manifest is written.
 
-**Row `i` of `vectors.npy` is row `i` of `chunks.parquet`.** Nothing else joins them — there
-is no id column in the vector file and no vector column in the chunk file. A shift of one row
-does not fail, it silently cites the wrong page for every answer, so the alignment is checked
-against what actually landed on disk before the manifest is written.
-
-**The manifest is the commit record.** It is written last and atomically: an interrupted build
-leaves a directory that `load_index` refuses as incomplete, never one it opens and trusts.
-Its `embedder` block is the §3.1 fingerprint, which is what turns "the index was built by a
-different model" from a silent collapse of retrieval quality into a hard failure at query time.
-
-Nothing here touches the network (§0.3).
+The manifest is the commit record: written last and atomically, so an interrupted build
+leaves something `load_index` refuses rather than something it trusts. Its `embedder` block
+is the §3.1 fingerprint. No network (§0.3).
 """
 
 from __future__ import annotations
@@ -38,9 +30,8 @@ import numpy as np
 import polars as pl
 import structlog
 
-# `_schema_for` derives the parquet dtypes from the dataclass itself. Reused rather than
-# re-derived so a chunk frame written here decodes identically to one written by the stage
-# cache — and so a legitimately empty index still round-trips instead of losing its columns.
+# Reused, not re-derived, so a frame written here decodes identically to one from the
+# stage cache — and an empty index round-trips instead of losing its columns.
 from core.cache import _schema_for, hash_rows, stage_timer
 from core.config import Config
 from core.schema import Chunk
@@ -50,9 +41,8 @@ log = structlog.get_logger(__name__)
 
 STAGE_VERSION = "index/1"
 
-# §0.1 storage layout. Deliberately re-declared rather than imported from `retrieve/dense.py`:
-# ingest must not depend on retrieve. `tests/test_index.py` asserts the two agree, so a rename
-# on either side fails a test instead of producing an index nobody can open.
+# Re-declared rather than imported: ingest must not depend on retrieve. test_index.py
+# asserts the two agree, so a rename fails a test instead of orphaning an index.
 CHUNKS_NAME = "chunks.parquet"
 VECTORS_NAME = "vectors.npy"
 INDEX_MANIFEST_NAME = "index_manifest.json"
@@ -106,11 +96,10 @@ def index_id_for(
     fingerprint: dict[str, Any],
     chunk_config_hash: str,
 ) -> str:
-    """Content address of an index: its chunks, the embedder that vectorised them, the chunking.
+    """Content address: chunks, the embedder that vectorised them, and the chunking.
 
-    Re-running an unchanged corpus therefore lands on the same directory and rewrites nothing,
-    while changing the embedder or a chunk parameter produces a *different* index rather than
-    a half-updated one.
+    An unchanged corpus lands on the same directory; a changed embedder or chunk parameter
+    produces a different index rather than a half-updated one.
     """
     digest = hashlib.sha256()
     digest.update(hash_rows(chunks).encode())
@@ -170,8 +159,7 @@ def build_index(
             "index_id": index_id,
             "n_vectors": len(chunks),
             "chunk_config_hash": cfg.chunk_config_hash,
-            # Not in §3.1's example, but the writer's own version: a future change to this
-            # layout must be detectable by a reader rather than misread as a valid index.
+            # Writer's own version, so a future layout change is detectable by a reader.
             "stage_version": STAGE_VERSION,
             "embedder": dict(fingerprint),
         }
@@ -222,8 +210,8 @@ def _validated(
             f"same document was probably ingested twice"
         )
     if matrix.shape[0] == 0:
-        # Not an error: a corpus of image-only PDFs with OCR disabled legitimately yields
-        # nothing. It is a loud warning because it looks exactly like a broken pipeline.
+        # Legitimate for image-only PDFs with OCR off, but it looks exactly like a
+        # broken pipeline, so it is loud.
         log.warning("index.empty", hint="no chunks to index — every query will abstain")
     return matrix
 
@@ -233,8 +221,8 @@ def _reusable(
 ) -> dict[str, Any] | None:
     """A complete index already at `target` for this exact id, embedder and row count.
 
-    Resumability (§0 non-negotiable 1) — but only for a *byte-identical* build. Anything
-    partial, unreadable or disagreeing is rewritten rather than trusted.
+    Resumability (§0 non-negotiable 1), byte-identical builds only. Anything partial or
+    disagreeing is rewritten rather than trusted.
     """
     manifest_file = target / INDEX_MANIFEST_NAME
     present = (manifest_file, target / CHUNKS_NAME, target / VECTORS_NAME)
@@ -261,10 +249,9 @@ def _write_index(
     matrix: np.ndarray,
     manifest: dict[str, Any],
 ) -> None:
-    """Chunks, then vectors, then the manifest — each file atomically, in that order.
+    """Chunks, then vectors, then the manifest — each atomic, in that order.
 
-    The manifest goes last because `load_index` treats it as proof of a complete index. A
-    build killed halfway therefore leaves something a reader refuses, not something it opens.
+    Manifest last because `load_index` treats it as proof of a complete index.
     """
     target.mkdir(parents=True, exist_ok=True)
 
@@ -294,11 +281,10 @@ def _atomic(path: Path, write: Callable[[Path], None]) -> None:
 
 
 def _verify_written(target: Path, chunks: Sequence[Chunk], matrix: np.ndarray) -> None:
-    """Read back what landed and prove the two files still line up row for row.
+    """Read back what landed and prove the two files line up row for row.
 
-    Checked against the disk, not against the in-memory sequences, because the failure this
-    guards is a write that reordered or dropped rows. It costs one parquet read of a column
-    and a memmap header — nothing next to the embedding pass that produced the vectors.
+    Against the disk, not the in-memory sequences — the failure guarded here is a write
+    that reordered or dropped rows. Costs one column read and a memmap header.
     """
     written_ids = pl.read_parquet(target / CHUNKS_NAME, columns=["chunk_id"])["chunk_id"].to_list()
     expected_ids = [c.chunk_id for c in chunks]

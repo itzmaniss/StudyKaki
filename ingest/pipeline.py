@@ -2,27 +2,22 @@
 
     load -> (ocr, only when there is no text layer) -> normalize -> chunk -> embed -> index
 
-Every stage here is one already-tested function from `ingest/`. This module owns three things
-and nothing else: **what runs**, **what it is keyed on**, and **when a model gets loaded.**
+Every stage is one already-tested function from `ingest/`. This module owns what runs, what
+it is keyed on, and when a model gets loaded — nothing else.
 
-**OCR is skipped whenever the PDF has a text layer** (§3 `load` — "biggest single speedup
-available"). `load.py` decides; the pipeline only obeys, because a born-digital textbook that
-gets rasterised and re-recognised costs minutes per document and *loses* the exact glyphs it
-already had.
+OCR is skipped whenever the PDF has a text layer (§3). `load.py` decides; rasterising a
+born-digital textbook costs minutes and loses the exact glyphs it already had.
 
-**Nothing is keyed on `cfg.config_hash`.** `load`, `ocr` and `normalize` produce the same
-output whatever is in `configs/base.yaml` — their models and parameters already ride in their
-own input hashes — so they key on a constant, and only `chunk` keys on `chunk_config_hash`.
-Keying the whole pipeline on the whole config would re-OCR the corpus every time the developer
-retunes `retrieve.tau` tonight, which is exactly the cost §0 non-negotiable 1 exists to prevent.
+Nothing is keyed on `cfg.config_hash`. `load`, `ocr` and `normalize` already carry their
+models and parameters in their own input hashes, so they key on a constant and only `chunk`
+keys on `chunk_config_hash` — otherwise retuning `retrieve.tau` would re-OCR the corpus.
 
-**Embedding is per document, never per corpus.** `embed_chunks` keys on the hash of the texts
-it is handed, so one corpus-wide call means adding the fifty-first PDF re-embeds the other
-fifty. Per document, a resumed run pays only for what changed.
+Embedding is per document: one corpus-wide call would re-embed fifty PDFs to add the
+fifty-first.
 
-**Models are loaded lazily and at most once.** The OCR engine is built only if some document
-lacks a text layer; the embedder compiles only on an embed cache miss. A fully cached re-run
-of the pipeline therefore touches no IR at all — and nothing here touches the network (§0.3).
+Models load lazily and at most once — the OCR engine only if some document lacks a text
+layer, the embedder only on an embed cache miss. A fully cached re-run touches no IR, and
+nothing here touches the network (§0.3).
 """
 
 from __future__ import annotations
@@ -51,8 +46,7 @@ log = structlog.get_logger(__name__)
 
 STAGE_VERSION = "pipeline/1"
 
-#: Rasterisation DPI for documents that have to go through OCR. 200 is PaddleOCR mobile's
-#: comfortable range for body text at textbook point sizes.
+#: PaddleOCR mobile's comfortable range for body text at textbook point sizes.
 DEFAULT_OCR_DPI = 200
 
 #: See the module docstring: stages whose output no `configs/base.yaml` key can change.
@@ -60,12 +54,11 @@ CONFIG_INDEPENDENT = "none"
 
 PDF_SUFFIX = ".pdf"
 
-#: Corpus layout convention — `data/corpus/<lang>/`, the layout `scripts/fetch_corpus.py`
-#: writes. A document's language is not recoverable from the PDF before OCR: detecting script
-#: needs text, and on a scanned page OCR is the thing that produces it. The directory is the
-#: only honest source, and one index spans all three languages, so the hint cannot be a
-#: per-run flag. Languages with no dedicated head map to None — PP-OCRv5's default recogniser
-#: is Chinese+English, which is already the correct head for `zh`.
+#: `data/corpus/<lang>/`, what `scripts/fetch_corpus.py` writes. Language is not
+#: recoverable from a scanned PDF before OCR — detecting script needs text, and OCR is what
+#: produces it — so the directory is the only honest source. One index spans all three
+#: languages, so this cannot be a per-run flag. None means no dedicated head; v5's default
+#: recogniser is already correct for `zh`.
 LANG_SCRIPT_HINTS: dict[str, str | None] = {"ta": "taml", "en": "latn", "zh": None}
 
 
@@ -86,8 +79,8 @@ class DocumentIngest:
 
 @dataclass(frozen=True)
 class IngestResult:
-    """What a corpus run produced. Deliberately holds no vectors: they are on disk already,
-    and keeping a second copy alive doubles peak RSS on an 8 GB machine for nothing."""
+    """What a corpus run produced. Holds no vectors — they are on disk, and a second copy
+    doubles peak RSS for nothing."""
 
     index: BuiltIndex
     documents: list[Document]
@@ -104,13 +97,12 @@ class IngestResult:
 
 
 class _LazyEmbedder:
-    """Stands in for `ingest.embed.Embedder` until something actually needs the weights.
+    """Stands in for `ingest.embed.Embedder` until something needs the weights.
 
-    `embed_chunks` touches exactly two members of an embedder: `.fingerprint`, to build the
-    cache key, and `.embed_passages`, only on a miss. The fingerprint is a hash of the IR on
-    disk plus a JSON block, so it can be produced without `compile_model`. That is the whole
-    point: a resumed ingest whose vectors are all cached must not spend 20 s compiling a
-    544 MB IR to discover it has nothing to embed.
+    `embed_chunks` touches only `.fingerprint` (for the cache key) and `.embed_passages` (on
+    a miss). The fingerprint is a hash of the IR plus a JSON block, so it needs no
+    `compile_model` — a fully cached resume must not spend 20 s compiling to learn it has
+    nothing to embed.
     """
 
     def __init__(self, cfg: Config, *, manifest_path: str | Path | None = None) -> None:
@@ -148,8 +140,8 @@ class _LazyEmbedder:
 class Pipeline:
     """Ingest, resumable at every stage. Reusable across documents; not thread-safe.
 
-    `cache`, `embedder` and `engine` are injectable so the orchestration can be tested without
-    a 544 MB IR on disk — and so `data/` is never written by a test.
+    `cache`, `embedder` and `engine` are injectable, so orchestration is testable without a
+    544 MB IR and no test writes `data/`.
     """
 
     def __init__(
@@ -169,18 +161,17 @@ class Pipeline:
         if dpi <= 0:
             raise ValueError(f"dpi must be positive, got {dpi}")
         self.cfg = cfg
-        # Caching is a non-negotiable (§0.1), so it is the default rather than an opt-in.
-        # `StageCache(root, enabled=False)` is how a caller turns it off deliberately.
+        # Non-negotiable (§0.1), so it defaults on. `StageCache(root, enabled=False)`
+        # is the deliberate opt-out.
         self.cache = StageCache.from_config(cfg) if cache is None else cache
         self.manifest_path = manifest_path
         self.ocr_params = ocr_params
         self.dpi = dpi
         self.batch_size = batch_size
         self.index_root = index_root
-        # Which recognition head leads on a scanned document. Text-based head routing cannot
-        # bootstrap itself when the default charset cannot represent the script at all — a
-        # Tamil page read by the Chinese+English head yields confident nonsense that
-        # `detect_script` labels `hans`, so the Tamil head is never reached. See ingest/ocr.py.
+        # Which head leads on a scanned document. Text-based routing cannot bootstrap when
+        # the default charset cannot represent the script: a Tamil page read by the zh+en
+        # head is confident nonsense that `detect_script` calls `hans`. See ingest/ocr.py.
         self.script_hint = script_hint
         self._embedder = (
             embedder if embedder is not None else _LazyEmbedder(cfg, manifest_path=manifest_path)
@@ -189,9 +180,8 @@ class Pipeline:
 
     @property
     def fingerprint(self) -> dict[str, Any]:
-        """The embedder that will vectorise this corpus — and therefore the §3.1 block that
-        goes into `index_manifest.json`. Taken from the embedder itself, not recomputed, so
-        the manifest can never describe a different model than the one that ran."""
+        """The §3.1 block for `index_manifest.json`. Taken from the embedder itself, not
+        recomputed, so the manifest cannot describe a different model than the one that ran."""
         return dict(self._embedder.fingerprint)
 
     def engine(self) -> OcrEngine:
@@ -258,9 +248,8 @@ class Pipeline:
     def ingest_paths(self, paths: Sequence[str | Path]) -> IngestResult:
         """Every document, then one index over all of them.
 
-        Documents are ordered by `doc_id` before indexing, so the index is a function of the
-        corpus and not of the order the files were named on the command line — the same set
-        of PDFs lands on the same `index_id` and rewrites nothing.
+        Ordered by `doc_id` before indexing, so the index is a function of the corpus and not
+        of command-line order — the same PDFs land on the same `index_id`.
         """
         resolved = [Path(p) for p in paths]
         with stage_timer("pipeline", _corpus_hash(resolved)) as span:
@@ -298,8 +287,8 @@ class Pipeline:
         return result
 
     def _ingest_each(self, paths: Sequence[Path]) -> list[DocumentIngest]:
-        """Load each path once. Two paths with identical bytes are one document (§2: `doc_id`
-        is the sha256 of the file), and indexing it twice would duplicate every citation."""
+        """Load each path once. Identical bytes are one document (§2), and indexing it
+        twice would duplicate every citation."""
         ingests: list[DocumentIngest] = []
         seen: set[str] = set()
         for path in paths:

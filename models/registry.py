@@ -1,18 +1,15 @@
 """Model registry — load a converted model by name, with mandatory device fallback.
 
-ARCHITECTURE.md §1 (`models/registry.py`), §3.1 (embedder fingerprint), §7.2 (`CACHE_DIR`),
-§7.4 (GPU -> CPU fallback, log which device won).
+ARCHITECTURE.md §1, §3.1, §7.2, §7.4. Two contracts:
 
-Two contracts live here:
+1. Device fallback. `configs/base.yaml` states intent; the machine decides. Every load
+   tries the configured device, falls back to CPU, and reports what it got on
+   `LoadedModel.device` so `eval/bench.py` can be honest.
+2. Embedder fingerprint. Query- and index-time embeddings must come from a byte-identical
+   model, so `verify_fingerprint` raises rather than degrading quietly.
 
-1. **Device fallback.** `configs/base.yaml` states *intent* (`device: GPU`). The machine
-   decides. Every load tries the configured device, falls back to CPU, and reports the
-   device it actually got on `LoadedModel.device` so `eval/bench.py` can be honest.
-2. **Embedder fingerprint.** Query-time and index-time embeddings must come from a
-   byte-identical model. `verify_fingerprint` raises rather than degrading quietly.
-
-Paths inside `manifest.json` are relative to the manifest file's own directory, so a
-manifest plus its `ir/` tree can be relocated (or built under a test's `tmp_path`) intact.
+Manifest paths are relative to the manifest's own directory, so it and its `ir/` tree
+relocate intact.
 """
 
 from __future__ import annotations
@@ -38,14 +35,10 @@ CPU = "CPU"
 IR_XML_NAME = "openvino_model.xml"
 IR_BIN_NAME = "openvino_model.bin"
 
-# §7.3 `hf_vlm` kind (models/convert.py:convert_vlm) exports through
-# `OVModelForVisualCausalLM`, which writes a multi-part IR instead of the single
-# `openvino_model.{xml,bin}` pair every other kind produces: the language tower, the text
-# and vision embedding towers, and (for Gemma 4) the per-layer embeddings each get their own
-# graph. `openvino_language_model.{xml,bin}` is the authoritative "is this converted / what's
-# its fingerprint" pair for such an entry — detected from file presence, not a manifest field,
-# so this module stays independent of convert.py's SOURCES/Kind table and no
-# MANIFEST_SCHEMA_VERSION bump is needed.
+# §7.3 `hf_vlm` writes a multi-part IR — language tower, text and vision embedding towers,
+# and Gemma 4's per-layer embeddings — instead of one `openvino_model.{xml,bin}` pair. The
+# language pair is the authoritative converted/fingerprint marker, detected from file
+# presence rather than a manifest field so this module stays independent of convert.py.
 VLM_LANGUAGE_MODEL_XML_NAME = "openvino_language_model.xml"
 VLM_LANGUAGE_MODEL_BIN_NAME = "openvino_language_model.bin"
 
@@ -57,8 +50,8 @@ ROLES = (
     # Optional per-script recognition heads (§3). Unset in config means "no dedicated head".
     "ocr_rec_taml",
     "ocr_rec_latn",
-    # §10 cross-encoder. Unset means the rerank arm cannot be switched on (core/config.py
-    # refuses the combination), not that retrieval is broken.
+    # §10 cross-encoder. Unset means the rerank arm cannot be enabled, not that
+    # retrieval is broken.
     "reranker",
 )
 
@@ -147,22 +140,20 @@ class ModelEntry:
 
     @property
     def is_vlm(self) -> bool:
-        """Multi-part IR (§7.3 `hf_vlm` kind), detected by file presence on disk.
+        """Multi-part IR (§7.3 `hf_vlm`), detected by file presence.
 
-        `openvino_genai.VLMPipeline` is what `answer/generate.py:load_generator` builds for
-        an entry that answers True here, in place of `LLMPipeline`.
+        True here means `load_generator` builds a `VLMPipeline`, not an `LLMPipeline`.
         """
         return not self.ir_xml.exists() and self.vlm_language_model_xml.exists()
 
     @property
     def compile_xml(self) -> Path:
-        """The graph `ov.Core.compile_model` should be pointed at for this entry.
+        """The graph `compile_model` should be pointed at for this entry.
 
-        For a multi-part VLM IR there is no `openvino_model.xml` to compile, so this is the
-        language tower — the dominant cost of the §7.2 cache warm, and the only part of a
-        `VLMPipeline` this text-only project ever exercises. The vision and embedding towers
-        stay cold; warming them would mean building a `VLMPipeline` here, which would drag
-        `openvino_genai` into a module that deliberately depends only on `openvino`.
+        A multi-part VLM has no `openvino_model.xml`, so this is the language tower — the
+        dominant §7.2 cache-warm cost and the only part a text-only project exercises.
+        Warming the vision towers would drag `openvino_genai` into a module that depends
+        only on `openvino`.
         """
         return self.vlm_language_model_xml if self.is_vlm else self.ir_xml
 
@@ -295,8 +286,8 @@ def spec_for(name: str, cfg: Config) -> tuple[str, ModelSpec]:
 def select_device(requested: str, core: ov.Core | None = None) -> str:
     """§7.4 — the device we will actually get, without compiling anything.
 
-    `openvino_genai` pipelines take a device string rather than a compiled model, so
-    `answer/generate.py` needs the fallback decision separately from `load_model`.
+    GenAI pipelines take a device string, not a compiled model, so `answer/generate.py`
+    needs the fallback decision separately from `load_model`.
     """
     core = core or ov.Core()
     available = set(core.available_devices)
@@ -443,11 +434,10 @@ _SHA_CACHE: dict[tuple[str, int, int], str] = {}
 def ir_sha256(entry: ModelEntry) -> str:
     """§3.1 rule 4 — the weights are the identity, so hash them, don't trust the label.
 
-    A multi-part VLM entry (§7.3 `hf_vlm`) has no `openvino_model.bin`; the language model
-    part stands in as the weights that identify it, same as `is_converted`.
+    A multi-part VLM has no `openvino_model.bin`, so the language tower stands in.
 
-    Memoised on (path, size, mtime): re-hashing 2 GB of INT8 weights on every query would
-    dominate retrieval latency, and any edit to the file moves mtime.
+    Memoised on (path, size, mtime): re-hashing 2 GB per query would dominate latency, and
+    any edit moves mtime.
     """
     bin_path = entry.vlm_language_model_bin if entry.is_vlm else entry.ir_bin
     if not bin_path.exists():
@@ -479,10 +469,9 @@ def embedder_fingerprint(
 ) -> dict[str, Any]:
     """The §3.1 `embedder` block, verbatim — write this into `index_manifest.json`.
 
-    `ov_version` is the *runtime* OpenVINO version, not the one recorded at conversion:
-    §3.1 rule 2 says the fingerprint is recomputed at query time, and §7.1 treats an
-    OpenVINO version change as a reason to distrust a model artefact. An upgrade
-    therefore forces a re-index rather than a silent quality drop.
+    `ov_version` is the runtime version, not the conversion-time one: §7.1 treats an
+    OpenVINO upgrade as reason to distrust an artefact, so it forces a re-index rather
+    than a silent quality drop.
     """
     manifest = load_manifest(manifest_path)
     entry = manifest.by_name(cfg.models.embedder.name)

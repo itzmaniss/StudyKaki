@@ -1,12 +1,12 @@
 """Prompt construction and the answer-tier contract — ARCHITECTURE.md §4, §9, §0.6.
 
-Tier 1 (local index) is the default and the only grounded path. Tier 3 (model parametric
-knowledge) lives here as pure helpers because it is a *presentation* contract, not a model
-concern: it must be opt-in, must carry a fixed disclaimer, and must never emit a citation.
+Tier 1 (local index) is the default and the only grounded path. Tier 3 (parametric
+knowledge) is here as pure helpers because it is a presentation contract, not a model one:
+opt-in, fixed disclaimer, never a citation.
 
-**Numbering contract, shared with `answer/cite.py`:** context blocks are numbered `[1]..[n]`
-by position in the list passed here. `answer/cite.py` resolves `[n]` back to
-`context_hits[n - 1]`, so both must be given the same list in the same order.
+Numbering contract, shared with `answer/cite.py`: blocks are `[1]..[n]` by position in the
+list passed here, and `cite.py` resolves `[n]` to `context_hits[n - 1]`. Same list, same
+order, both sides.
 """
 
 from __future__ import annotations
@@ -26,9 +26,8 @@ ABSTAIN_MESSAGE = "I couldn't find this in your documents."
 # since `Answer` carries no tier field.
 TIER3_DISCLAIMER = "General knowledge — not from your materials. May not match your syllabus."
 
-# BLOCKERS #21 - the reminder names the language, so a script code is not enough. Only
-# the three corpus languages are named; anything else gets no reminder rather than a
-# guess, since telling a model to "answer in und" is worse than saying nothing.
+# BLOCKERS #21 — the reminder names the language, so a script code will not do. Only the
+# three corpus languages; "answer in und" is worse than no reminder.
 LANGUAGE_NAMES: dict[str, str] = {
     "en": "English",
     "zh": "Chinese",
@@ -59,11 +58,10 @@ number, a chapter, or a document — you have no source to point at.
 4. Be concise. No preamble."""
 
 
-# Characters per token by script, measured on this corpus against the Qwen3-4B INT4
-# tokenizer (BLOCKERS #11). Tamil is why this table exists: it packs roughly twice as many
-# tokens into the same character count as English, so five Tamil chunks are ~10.4k tokens
-# where five English ones are ~4.7k. Unmeasured scripts inherit the rate of the measured one
-# they most resemble, biased dense — Devanagari and Thai price as Tamil, not as Latin.
+# Measured on this corpus against the Qwen3-4B INT4 tokenizer (BLOCKERS #11). Tamil packs
+# ~2x the tokens per character of English: five Tamil chunks are ~10.4k tokens where five
+# English are ~4.7k. Unmeasured scripts inherit the closest measured rate, biased dense —
+# Devanagari and Thai price as Tamil, not Latin.
 _CHARS_PER_TOKEN: dict[str, float] = {
     "taml": 1.10,
     "deva": 1.10,
@@ -83,17 +81,15 @@ _CHARS_PER_TOKEN: dict[str, float] = {
 # Digits, punctuation and whitespace carry no script; price them as Latin.
 _DEFAULT_CHARS_PER_TOKEN = 2.33
 
-# The table holds averages, so an individual passage can run denser than its script's mean.
-# This estimate is only reached when no real tokenizer is available, and undercounting
-# reintroduces the exact failure the budget exists to prevent — so it deliberately runs high.
+# The table is averages and a passage can run denser. Only reached with no real tokenizer,
+# where undercounting reintroduces the failure the budget prevents — so it runs high.
 _ESTIMATE_SAFETY = 1.15
 
 
 class Tier3DisabledError(RuntimeError):
     """§9: Tier 3 defaults to off and is opt-in only.
 
-    Raised when the ungrounded path is invoked without an explicit `enabled=True`, so no
-    code path can leak unsourced content into a study tool by omission.
+    Raised without an explicit `enabled=True`, so no path leaks unsourced content by omission.
     """
 
 
@@ -108,9 +104,8 @@ def format_context(hits: Sequence[Retrieved], *, doc_names: Mapping[str, str] | 
 def language_reminder_for(question: str) -> str:
     """`(Answer in X.)` for a question whose language we can name, else "" (BLOCKERS #21).
 
-    Placed between the context and `Answer:` by `build_prompt`. The position is the whole
-    point: `SYSTEM_INSTRUCTION` rule 1 already says this thousands of tokens earlier, and
-    that distance is exactly what a weaker instruction-follower loses it over.
+    Placed between the context and `Answer:`. Position is the point — rule 1 says this
+    thousands of tokens earlier, and that distance is what a weaker model loses it over.
     """
     name = LANGUAGE_NAMES.get(lang_for_script(detect_script(question)))
     return f"(Answer in {name}.)" if name else ""
@@ -135,10 +130,8 @@ def build_prompt(
 def estimate_tokens(text: str) -> int:
     """Script-weighted token estimate, for when no real tokenizer is at hand.
 
-    Prefer the generator's own `count_tokens`; this is the documented fallback. Counting
-    whitespace words (`ingest.chunk.count_tokens`) is *not* an alternative here — it
-    undercounts Tamil subwords roughly sevenfold, which is precisely how BLOCKERS #11 stayed
-    invisible until generation crashed.
+    Prefer the generator's `count_tokens`. Whitespace words are not an alternative — they
+    undercount Tamil subwords ~7x, which is how BLOCKERS #11 hid until generation crashed.
     """
     if not text:
         return 0
@@ -177,13 +170,11 @@ def fit_context(
 ) -> FittedContext:
     """Longest prefix of `hits` whose Tier 1 prompt fits `max_prompt_tokens` (BLOCKERS #11).
 
-    Blocks are dropped from the tail, so the highest-scoring context is what survives. At
-    least one block is always kept, and a lone block over budget is returned anyway for the
-    caller to log and attempt: an answer from three chunks beats an exception from five.
+    Dropped from the tail, so the highest-scoring context survives. One block is always
+    kept, and a lone over-budget block is returned anyway to log and attempt.
 
-    Truncating a block's *text* to fit is deliberately not done. It would keep the block count
-    up at the cost of the §4 provenance contract — a citation would point at a page whose text
-    the model was never shown.
+    Truncating a block's text is deliberately not done: it would keep the count up at the
+    cost of §4 provenance, citing a page whose text the model never saw.
     """
     if max_prompt_tokens <= 0:
         raise ValueError(f"max_prompt_tokens must be > 0, got {max_prompt_tokens}")
@@ -234,12 +225,12 @@ def render_tier3_answer(
 ) -> Answer:
     """Wrap ungrounded model output in the §9 contract.
 
-    The disclaimer is prepended verbatim, every citation marker is stripped (the prompt asks
-    the model not to emit them; this makes it true), and when Tier 1 abstained we say so
-    first so the student is never left thinking this came from their materials.
+    Disclaimer verbatim, every citation marker stripped (the prompt asks; this enforces),
+    and the Tier 1 abstention stated first so the student never thinks this came from their
+    materials.
 
-    `abstained` is False — an answer *was* produced. The presence of `TIER3_DISCLAIMER` is
-    what marks it ungrounded, since `Answer` has no tier field.
+    `abstained` is False — an answer was produced. `TIER3_DISCLAIMER` is what marks it
+    ungrounded, since `Answer` has no tier field.
     """
     if enabled is not True:
         raise Tier3DisabledError(

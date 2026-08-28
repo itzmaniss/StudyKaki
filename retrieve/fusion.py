@@ -1,25 +1,19 @@
-"""Rank fusion — ARCHITECTURE.md §1 ("interface exists even if only dense is wired"), §10.
+"""Rank fusion — ARCHITECTURE.md §1, §10.
 
-V1 wires **dense retrieval only**. This module exists so the seam is real rather than
-imagined: `fuse()` is what `retrieve/dense.py` output goes through today, and it already
-takes a list of ranked lists rather than one.
+V1 wires dense only, but `fuse()` already takes a list of ranked lists, so the seam is real
+rather than imagined. V2 plugged in as designed: `retrieve/lexical.py` passes a BM25
+`RankedList` alongside, and none of the arithmetic changed. `HybridRetriever` is the
+composition, off unless `retrieve.hybrid.enabled`.
 
-**V2 (§10) plugged in as designed.** `retrieve/lexical.py` produces a BM25 `RankedList` over
-the same chunk corpus and is passed alongside the dense list; nothing in the fusion arithmetic
-below changed when it arrived. `HybridRetriever` at the bottom of this file is the composition,
-off unless `retrieve.hybrid.enabled`.
+The score-units trap: RRF scores come from ranks, not similarities. The best possible RRF
+score for one list is `1/(60+1)` ≈ 0.016, far below tau (0.45), so feeding RRF to
+`retriever.abstains` would abstain on every query. `FusionResult.scores_are_similarities`
+says which units you hold.
 
-**The score-units trap — and why `HybridRetriever` cannot yet answer.** RRF scores are derived
-from ranks, not similarities: the best possible RRF score for a single list is `1/(60+1)`
-≈ 0.016, far below `cfg.retrieve.tau` (0.45). Feeding RRF output to
-`retriever.abstains(hits, tau)` would abstain on every query.
-`FusionResult.scores_are_similarities` says which units you are holding.
-
-This makes the hybrid arm immediately measurable on `recall@k` and `mrr@10`, which are pure
-rank metrics and never look at `score` — and *not* yet safe to put behind `answer/generate.py`,
-whose abstain gate is calibrated on cosine (BLOCKERS #8: tau's safe window is 0.01 wide). The
-gap is recorded as BLOCKERS #12; `last_dense_top_score` exposes what an abstain decision would
-need, but nothing consumes it yet.
+So the hybrid arm is measurable on `recall@k` and `mrr@10` (pure rank metrics) but not yet
+safe behind `answer/generate.py`, whose gate is calibrated on cosine — tau's safe window is
+0.01 wide (BLOCKERS #8). Gap tracked as BLOCKERS #12; `last_dense_top_score` exposes what
+an abstain decision would need, unconsumed for now.
 """
 
 from __future__ import annotations
@@ -72,10 +66,10 @@ def reciprocal_rank_fusion(
     rrf_k: int = RRF_K,
     k: int | None = None,
 ) -> list[Retrieved]:
-    """Fuse ranked lists by `sum(weight / (rrf_k + rank))`, deduplicated on `chunk_id`.
+    """Fuse ranked lists by `sum(weight / (rrf_k + rank))`, deduped on `chunk_id`.
 
     Ranks come from `Retrieved.rank`, not list position, so a sliced list keeps its true
-    ranks. Returned scores are RRF scores — **not** similarities; see the module docstring.
+    ranks. Returned scores are RRF, not similarities — see the module docstring.
     """
     if rrf_k < 1:
         raise ValueError(f"rrf_k must be >= 1, got {rrf_k}")
@@ -111,10 +105,9 @@ def fuse(
 ) -> FusionResult:
     """Pipeline entry point. One list passes through untouched; two or more get RRF.
 
-    The passthrough is not a special case for its own sake — it is what keeps V1 honest.
-    With only dense wired, scores stay cosine similarities and `cfg.retrieve.tau` still
-    means what §4 says it means. The day a second arm appears, `scores_are_similarities`
-    flips to False and the caller is forced to notice.
+    The passthrough keeps V1 honest: with only dense wired, scores stay cosine and tau still
+    means what §4 says. A second arm flips `scores_are_similarities` and forces the caller
+    to notice.
     """
     if not lists:
         raise ValueError("fuse() needs at least one ranked list — zero means nothing is wired")
@@ -145,12 +138,12 @@ def fuse(
 class HybridRetriever:
     """Dense + BM25, fused by RRF — the §10 hybrid arm.
 
-    Both arms are asked for `k` hits and fused down to `k`, rather than each being asked for
-    `k/2`. A chunk that both arms rank highly should be able to beat one that only dense found,
-    and that comparison cannot happen if the lists are truncated before fusion.
+    Both arms are asked for `k` and fused down to `k`, not asked for `k/2` each: a chunk both
+    arms rank highly should be able to beat one only dense found, and truncating first
+    prevents that comparison.
 
-    Scores on the returned hits are **RRF scores, not similarities** — see the module
-    docstring. `last_dense_top_score` carries the cosine score an abstain decision would need.
+    Returned scores are RRF, not similarities. `last_dense_top_score` carries the cosine an
+    abstain decision would need.
     """
 
     @classmethod
@@ -180,9 +173,8 @@ class HybridRetriever:
     def abstain_top_score(self) -> float | None:
         """Cosine score the abstain gate should read — never the RRF score (BLOCKERS #12).
 
-        The lexical arm cannot contribute here: BM25 scores are unbounded and share no scale
-        with tau, so a lexical-only hit cannot rescue a query dense wanted to abstain on. That
-        is the deliberate cost of keeping tau's calibration (BLOCKERS #8).
+        BM25 is unbounded and shares no scale with tau, so a lexical-only hit cannot rescue
+        a query dense wanted to abstain on. The deliberate cost of tau's calibration (#8).
         """
         return self.last_dense_top_score
 

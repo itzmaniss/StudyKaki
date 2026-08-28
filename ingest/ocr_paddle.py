@@ -1,17 +1,14 @@
 """PaddleOCR mobile det + rec through OpenVINO — the backend behind `ingest/ocr.py` (§3).
 
-Split out of `ingest/ocr.py` so the stage stays model-agnostic (and both files stay under
-CLAUDE.md's 500-line limit). `ingest/ocr.py` owns the protocols, the `Block` contract and
-the cache; everything that knows what a DB probability map or a CTC lattice looks like
-lives here.
+Split out so the stage stays model-agnostic. `ingest/ocr.py` owns the protocols, the `Block`
+contract and the cache; everything that knows a DB probability map or a CTC lattice is here.
 
-**Mobile/tiny only** (§3, §7.6). Preprocessing and post-processing reproduce the values in
-the checkpoint's own metadata (`inference.yml` / `config.json`: `DetResizeForTest`,
-`NormalizeImage`, `DBPostProcess`), so the numbers here are PaddleOCR's, not invented.
+Mobile/tiny only (§3, §7.6). Pre- and post-processing reproduce the checkpoint's own
+metadata (`DetResizeForTest`, `NormalizeImage`, `DBPostProcess`), so the numbers are
+PaddleOCR's, not invented.
 
-No third-party image library is used. cv2, scipy and shapely are not declared dependencies
-in §0.1, and the three things they would be used for — bilinear resize, connected
-components, polygon offset — are each a few lines against a binarised map.
+No cv2/scipy/shapely — not declared in §0.1, and bilinear resize, connected components and
+polygon offset are each a few lines against a binarised map.
 """
 
 from __future__ import annotations
@@ -30,8 +27,8 @@ from ingest.ocr import DEFAULT_SCRIPT, DetBox, OcrModelError, OcrParams, RecResu
 
 log = structlog.get_logger(__name__)
 
-# INT8 softmax rows drift a few percent off 1.0 (measured 1.026). Wide enough to absorb that,
-# far tighter than any logit row sum, which is unbounded and routinely negative.
+# INT8 softmax rows drift off 1.0 (measured 1.026). Wide enough for that, far tighter
+# than a logit row sum, which is unbounded and routinely negative.
 PROBABILITY_SUM_TOLERANCE = 0.1
 
 # ImageNet constants applied, as upstream does, to a **BGR** array — see `_preprocess`.
@@ -42,8 +39,8 @@ _DET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 def _resize_bilinear(img: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
     """Half-pixel-centre bilinear, matching `cv2.resize(..., INTER_LINEAR)`.
 
-    The Paddle models were trained on cv2-resized inputs; a different sampling convention
-    shifts every box by a fraction of a pixel and costs recognition accuracy at small type.
+    Trained on cv2-resized inputs; another convention shifts every box by a fraction of a
+    pixel and costs accuracy at small type.
     """
     h, w = img.shape[:2]
     src = img.astype(np.float32, copy=False)
@@ -67,9 +64,8 @@ def _components(
 ) -> list[tuple[tuple[int, int, int, int], float]]:
     """Connected components of a binary map as (bbox, mean probability).
 
-    Run-length + union-find rather than `scipy.ndimage.label` or `cv2.findContours`: neither
-    is a declared dependency in §0.1, and a binarised DB map is a few thousand runs, so the
-    Python loop is over runs, never over pixels.
+    Run-length + union-find, not scipy/cv2 (§0.1). A binarised DB map is a few thousand
+    runs, so the Python loop is over runs, never pixels.
     """
     height, width = mask.shape
     parent: list[int] = []
@@ -140,10 +136,9 @@ def _components(
 
 
 def _unclip(box: tuple[int, int, int, int], ratio: float) -> tuple[float, float, float, float]:
-    """DB shrinks text regions at training time; the offset puts the box back around the glyphs.
+    """DB shrinks text regions at training time; this puts the box back around the glyphs.
 
-    `area * ratio / perimeter` is the Vatti offset pyclipper computes, which for an
-    axis-aligned rectangle reduces to this closed form.
+    `area * ratio / perimeter` is pyclipper's Vatti offset, closed-form for a rectangle.
     """
     x0, y0, x1, y1 = box
     w, h = x1 - x0, y1 - y0
@@ -154,10 +149,10 @@ def _unclip(box: tuple[int, int, int, int], ratio: float) -> tuple[float, float,
 class PaddleTextDetector:
     """PP-OCRv5 mobile detection (DB) through an OpenVINO compiled model.
 
-    Preprocessing reproduces the checkpoint's own `inference.yml`: **BGR** channel order
-    (PaddleOCR decodes with cv2 and normalises the BGR array with RGB-ordered ImageNet
-    constants — reproducing the quirk is required, "fixing" it silently degrades recall),
-    long side resized to `det_limit_side_len`, each side rounded to a multiple of 32.
+    Reproduces the checkpoint's `inference.yml`: BGR channel order (PaddleOCR normalises a
+    cv2-decoded BGR array with RGB-ordered ImageNet constants — reproducing the quirk is
+    required, "fixing" it degrades recall), long side to `det_limit_side_len`, sides
+    rounded to a multiple of 32.
     """
 
     def __init__(self, compiled: Any, params: OcrParams, fingerprint: str) -> None:
@@ -219,15 +214,12 @@ class PaddleTextDetector:
 
 
 def load_charset(ir_dir: Path, n_classes: int | None = None) -> list[str]:
-    """Character dictionary for CTC decoding, from what `models/convert.py` copies next to the IR.
+    """Character dictionary for CTC decoding, copied next to the IR by `convert_paddle`.
 
-    `convert_paddle` copies the checkpoint's `config.json` / `inference.yml`, both of which
-    carry `PostProcess.character_dict`. JSON is preferred: the YAML form of the PP-OCRv5
-    dictionary is 18k lines and parsing it on every model load is pure latency.
+    JSON over YAML: the YAML form of the v5 dictionary is 18k lines, pure load latency.
 
-    Index 0 is the CTC blank. PaddleOCR appends a space class when `use_space_char` is on;
-    `n_classes` (the model's real output width) decides whether this checkpoint has it,
-    rather than a flag that can disagree with the weights.
+    Index 0 is the CTC blank. The space class is decided by `n_classes` — the model's real
+    output width — rather than a `use_space_char` flag that can disagree with the weights.
     """
     chars: list[str] | None = None
     for name in ("config.json", "inference.yml"):
@@ -279,9 +271,8 @@ def _read_yaml(path: Path) -> dict[str, Any]:
 class PaddleTextRecognizer:
     """PP-OCRv5 mobile recognition (CTC) through an OpenVINO compiled model.
 
-    Crops are batched (§7.5 applies here for the same reason it applies to embeddings — a
-    per-crop call is ~10x the overhead for no benefit) and sorted by aspect ratio so a batch
-    pads to the width its own widest crop needs, not to the widest crop on the page.
+    Crops are batched (§7.5 — a per-crop call is ~10x the overhead) and sorted by aspect
+    ratio, so a batch pads to its own widest crop, not the page's.
     """
 
     def __init__(
@@ -331,17 +322,15 @@ class PaddleTextRecognizer:
             raise OcrModelError(f"recognition inference failed: {exc}") from exc
         if probs.ndim != 3:
             raise OcrModelError(f"recogniser produced shape {probs.shape}, expected [N,T,C]")
-        # PaddleOCR's exported rec graph ends in softmax and its confidences are read straight
-        # off the output. An IR exported without it would report logits as probabilities, so
-        # softmax is applied only when the output is *not* already a distribution.
+        # The exported rec graph ends in softmax, so apply it only when the output is not
+        # already a distribution — an IR exported without it would report logits as
+        # probabilities.
         #
-        # The test is deliberately loose. INT8 weight compression pushes the row sums off 1.0
-        # by a few percent — measured up to 1.026 on PP-OCRv5_mobile_rec — and a tight
-        # tolerance (1e-2) reads that drift as "these are logits" and softmaxes a second time.
-        # Re-softmaxing values already in [0,1] flattens them to near-uniform: peak probability
-        # collapses from 0.97 to 1.4e-4, every confidence rounds to 0.00, and `min_confidence`
-        # then drops every block on the page. The stage returns zero blocks and raises nothing.
-        # Logits are separable on sign and magnitude, not on a hair's-width sum, so test both.
+        # Loose on purpose. INT8 pushes row sums off 1.0 (measured 1.026), and a tight 1e-2
+        # tolerance reads that as logits and softmaxes twice. Re-softmaxing [0,1] values
+        # flattens them — peak 0.97 -> 1.4e-4, every confidence rounds to 0.00, and
+        # `min_confidence` drops the whole page while raising nothing. Logits separate on
+        # sign and magnitude, not on a hair's-width sum, so test both.
         looks_like_probabilities = probs.min() >= 0.0 and np.allclose(
             probs.sum(axis=-1), 1.0, atol=PROBABILITY_SUM_TOLERANCE
         )
