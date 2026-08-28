@@ -15,11 +15,10 @@ from core.schema import Retrieved
 class AltSource:
     """Another document carrying the same answer, and the pages it answers on *there*.
 
-    Page numbers are per document on purpose. Parallel editions are not reliably
-    page-aligned: `itu_wtdc22_{en,zh}` and `std12_cs_vol2_{en,ta}` line up at offset 0, but
-    `std12_cs_vol1_ta` runs one page longer than its English twin and drifts up to three pages
-    by the back of the book. Sharing one page list across both would score a correct hit as a
-    miss and an unrelated hit as correct.
+    Per document on purpose: parallel editions are not reliably aligned. `itu_wtdc22_{en,zh}`
+    and `std12_cs_vol2_{en,ta}` sit at offset 0, but `std12_cs_vol1_ta` runs a page longer
+    than its English twin and drifts up to three by the back. One shared page list would
+    score correct hits as misses.
     """
 
     doc_id: str
@@ -33,9 +32,9 @@ class GoldQuestion:
     doc_id: str
     gold_pages: list[int]
     note: str = ""
-    #: §5's shape is one `doc_id`, and that stays the primary. This is the extension for
-    #: parallel translations, where the same answer genuinely lives in two documents and
-    #: matching only one scores a retriever as wrong for being right in the other language.
+    #: §5's shape is one `doc_id`, still the primary. This extends it to parallel
+    #: translations, where matching only one scores a retriever wrong for being right in
+    #: the other language.
     alt_sources: tuple[AltSource, ...] = ()
 
     def __post_init__(self) -> None:
@@ -88,12 +87,11 @@ class GoldQuestion:
 def _alt_sources(raw: object, gold_pages: list[int], row: dict) -> tuple[AltSource, ...]:
     """Parse `alt_doc_ids`, which takes either shape:
 
-        "alt_doc_ids": ["<doc_id>"]              # same pages as gold_pages (aligned editions)
-        "alt_doc_ids": {"<doc_id>": [68, 69]}    # its own pages (editions that drift)
+        "alt_doc_ids": ["<doc_id>"]              # same pages as gold_pages (aligned)
+        "alt_doc_ids": {"<doc_id>": [68, 69]}    # its own pages (drifting editions)
 
-    The list form is the terse common case; the object form is what a drifting translation
-    needs. Anything else is rejected rather than guessed at — a silently misparsed label is
-    an eval number that is wrong in a way nobody can see.
+    Anything else is rejected, not guessed: a misparsed label is an eval number wrong in a
+    way nobody can see.
     """
     if raw is None:
         return ()
@@ -143,9 +141,8 @@ def mean(xs: list[float]) -> float:
 def groundedness(scores: list[float]) -> float:
     """Mean per-answer groundedness (§5).
 
-    Each score is `AnswerResult.groundedness` — the fraction of the citation markers the model
-    wrote that survived `answer/cite.py`'s check against the context it was actually given.
-    Abstentions are excluded by the caller: refusing to answer is not an ungrounded claim, and
-    scoring it as one would make abstaining look worse than inventing a citation.
+    Each score is the fraction of the model's citation markers that survived `cite.py`.
+    Callers exclude abstentions — refusing is not an ungrounded claim, and scoring it as one
+    would make abstaining look worse than inventing a citation.
     """
     return mean(scores)

@@ -1,15 +1,12 @@
-"""Content-addressed stage cache — ARCHITECTURE.md §0 non-negotiable 1, §0.1 storage layout.
+"""Content-addressed stage cache — ARCHITECTURE.md §0 non-negotiable 1, §0.1.
 
-Every ingest stage is keyed on `(input_hash, stage_version, config_hash)` and lands at
-`<root>/<stage>/<content_hash>.parquet` with zstd compression. Without this the developer
-re-OCRs the whole corpus every time he tunes a chunk parameter.
+Every stage keys on `(input_hash, stage_version, config_hash)` and lands at
+`<root>/<stage>/<content_hash>.parquet`, zstd. Without it, tuning one chunk parameter
+re-OCRs the corpus.
 
-The root is an argument, never a module constant: tests point it at `tmp_path`, production
-points it at `cfg.paths.data_dir / "cache"`.
-
-Writes go to a temp file and are `os.replace`d into position, so an interrupted run leaves
-either the previous entry or nothing — never a half-written parquet that a later run would
-happily read back as truth.
+Root is an argument, never a constant: `tmp_path` in tests, `data_dir / "cache"` in
+production. Writes are `os.replace`d into position, so an interrupted run leaves the
+previous entry or nothing — never a half-written parquet a later run reads as truth.
 """
 
 from __future__ import annotations

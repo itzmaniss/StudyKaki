@@ -37,14 +37,12 @@ class ModelsConfig(_Strict):
     ocr_rec: ModelSpec
     embedder: ModelSpec
     generator: ModelSpec
-    # §3's "per-script recognition head". Optional: `ocr_rec` alone is a working engine, just
-    # one that reads whatever its own charset covers. PP-OCRv5's default recogniser is
-    # Chinese+English, so a Tamil page without `ocr_rec_taml` decodes to CJK noise — at high
-    # confidence, which is worse than failing. Absent means "no dedicated head", not "broken".
+    # §3 per-script head. Optional: `ocr_rec` alone reads whatever its charset covers, and
+    # v5's default is zh+en, so a Tamil page without this decodes to CJK noise at high
+    # confidence — worse than failing. Absent means no dedicated head, not broken.
     ocr_rec_taml: ModelSpec | None = None
     ocr_rec_latn: ModelSpec | None = None
-    #: §10 cross-encoder. Optional for the same reason as the OCR heads: absent means the
-    #: rerank arm cannot be enabled, not that the system is broken.
+    #: §10 cross-encoder. Absent means the rerank arm cannot be enabled, not broken.
     reranker: ModelSpec | None = None
 
 
@@ -55,9 +53,8 @@ class ChunkConfig(_Strict):
 
 
 class RerankConfig(_Strict):
-    """§10 cross-encoder rerank. `top_n` is §10's own TTFT mitigation: 20 cross-encoder passes
-    on CPU is 1-2s, and recall@20 == recall@10 == 0.980 on this corpus, so reranking only the
-    top 10 costs nothing measurable."""
+    """§10 cross-encoder rerank. `top_n` is the TTFT mitigation: 20 passes on CPU is 1-2s,
+    and recall@20 == recall@10 == 0.980 here, so reranking 10 costs nothing measurable."""
 
     enabled: bool = False
     top_n: int = Field(default=20, gt=0)
@@ -84,8 +81,8 @@ class RetrieveConfig(_Strict):
     k: int = Field(gt=0)
     n_context: int = Field(gt=0)
     tau: float = Field(ge=0.0, le=1.0)
-    # Every V2 arm defaults off, so an unmodified configs/base.yaml is exactly the V1 baseline
-    # the before/after numbers are measured against (§10: no component ships on vibes).
+    # Every V2 arm defaults off, so an unmodified base.yaml is the V1 baseline the
+    # before/after numbers are measured against (§10).
     rerank: RerankConfig = RerankConfig()
     hybrid: HybridConfig = HybridConfig()
     rewrite: RewriteConfig = RewriteConfig()
@@ -106,19 +103,15 @@ class RetrieveConfig(_Strict):
 class GenerateConfig(_Strict):
     max_new_tokens: int = Field(gt=0)
     temperature: float = Field(ge=0.0)
-    #: Hard ceiling on prompt tokens before context is trimmed. Not a model-context limit —
-    #: OpenVINO's INT4 CPU MatMul fails outright above roughly 7k tokens on this build
-    #: ("could not create a primitive descriptor"), and Tamil reaches that first: it tokenizes
-    #: at ~1.1 chars/token against English's 2.33, so five Tamil chunks are ~10.4k tokens where
-    #: five English ones are ~4.7k. Without a budget the whole Tamil corpus is unanswerable.
+    #: Ceiling before context is trimmed. Not a model-context limit — INT4 CPU MatMul fails
+    #: above ~7k tokens on this build, and Tamil hits it first at ~1.1 chars/token against
+    #: English's 2.33. Without a budget the Tamil corpus is unanswerable.
     max_prompt_tokens: int = Field(default=6000, gt=0)
     #: Restate the question's language between the context and "Answer:" (BLOCKERS #21).
-    #: The rule is already in `SYSTEM_INSTRUCTION`, but a system block sits thousands of
-    #: tokens before generation starts, and a weaker instruction-follower loses it: gemma-4
-    #: answered 9 of 12 English cross-lingual questions in the *document's* language. The
-    #: reminder takes that to 12/12. qwen3-4b scores 1.000 without it, so this is off by
-    #: default for any generator that does not need it — it is a per-model trade, and every
-    #: prompt change re-baselines every eval number.
+    #: `SYSTEM_INSTRUCTION` already says it, but thousands of tokens earlier, and a weaker
+    #: model loses it: gemma-4 answered 9 of 12 English cross-lingual questions in the
+    #: document's language, 12/12 with the reminder. qwen3-4b scores 1.000 without it, so
+    #: this is off by default — a per-model trade, and every prompt change re-baselines.
     language_reminder: bool = False
 
 

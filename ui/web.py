@@ -1,18 +1,13 @@
-"""Browser UI — ARCHITECTURE.md §1 (thin, no logic here), §9 (tier visible on every answer).
+"""Browser UI — ARCHITECTURE.md §1 (thin), §9 (tier visible on every answer).
 
-Rendering and transport only. Retrieval, `tau`, tier selection, citation verification and
-telemetry all live in `retrieve/` and `answer/`; this module decides nothing about an answer.
+Rendering and transport only; nothing here decides anything about an answer.
 
-**Stdlib only.** §0.1 pins the dependency set and holds no web framework, so this is
-`http.server` and one HTML file. Adding Streamlit or FastAPI to get a demo page would put a
-framework in the runtime that the architecture does not carry.
+Stdlib only — §0.1 carries no web framework, so this is `http.server` and one HTML file.
+Localhost only — §0.3 forbids the network, so the server binds 127.0.0.1, the page loads no
+CDN asset, and PDFs come from the local registry. It works with the wifi off, which is the
+pitch.
 
-**Localhost only.** §0.3 forbids the network at runtime. The server binds 127.0.0.1, the page
-loads no CDN font or script, and PDFs are served from the local registry — so the whole thing
-still works with the wifi off, which is the pitch.
-
-`ui/app.py` (terminal) remains the reference UI. This is the same `Session` wiring behind a
-page, for when the demo needs a screen rather than a shell.
+`ui/app.py` remains the reference UI; this is the same `Session` wiring behind a page.
 """
 
 from __future__ import annotations
@@ -40,14 +35,12 @@ log = structlog.get_logger("ui.web")
 
 PAGE = Path(__file__).resolve().parent / "index.html"
 
-#: Shown as clickable chips so a demo does not begin with someone typing. These are the
-#: first thing a presenter clicks, so every one must clear `tau` on the shipped config — a
-#: demo opening with "I couldn't find this in your documents" is worse than no demo. Two of
-#: the previous three abstained: "Who formalised boolean algebra?" tops out at 0.445 against
-#: tau 0.45 (BLOCKERS #18), and the shorter Tamil phrasing at 0.365. All three below are
-#: verbatim from eval/golden.jsonl — so each is a question with a measured answer, not a
-#: hand-written one — and score 0.647 / 0.608 / 0.781, one per corpus language.
-#: Re-check with `retrieve.dense` after any change to the embedder, chunking or tau.
+#: Demo chips, so nobody has to type first. Every one must clear `tau` on the shipped
+#: config — an opening abstention is worse than no demo. Two of the previous three failed
+#: that: "Who formalised boolean algebra?" tops out at 0.445 against tau 0.45 (BLOCKERS
+#: #18), the short Tamil phrasing at 0.365. These three are verbatim from golden.jsonl and
+#: score 0.647 / 0.608 / 0.781, one per language. Re-check after any embedder, chunking or
+#: tau change.
 EXAMPLES = (
     "In which year did the personal computer first appear?",
     "பூலியன் இயற்கணிதத்தை உருவாக்கியவர் யார்?",
@@ -61,8 +54,8 @@ SNIPPET_CHARS = 220
 def index_of(retriever: Any) -> Any:
     """The `DenseIndex` behind whichever retriever is wired.
 
-    `HybridRetriever` holds its index one level down, on its dense arm — reading only
-    `.index` would report an empty corpus on exactly the configuration §10 chose to ship.
+    `HybridRetriever` holds its index on its dense arm, so reading `.index` alone would
+    report an empty corpus on the configuration §10 ships.
     """
     index = getattr(retriever, "index", None)
     if index is None:
@@ -77,9 +70,8 @@ def _short(name: str) -> str:
 def stack_of(cfg: Config, generator: Any, index: Any) -> list[list[str]]:
     """What actually loaded, for the strip along the bottom of the page.
 
-    §7.4: the device reported is the one the load *got*, not the one the config asked for,
-    and a fallback says so. A demo that claims GPU while running on CPU is the one lie the
-    telemetry exists to prevent.
+    §7.4 — the device the load got, not the one asked for, and a fallback says so. Claiming
+    GPU while running on CPU is the lie the telemetry exists to prevent.
     """
     fingerprint = getattr(index, "embedder", {}) or {}
     device = str(getattr(generator, "device", "") or "—")
@@ -102,8 +94,8 @@ class Backend:
         self.retriever = retriever
         self.generator = generator
         self.registry = registry
-        # One OpenVINO InferRequest per model, so concurrent questions would corrupt each
-        # other's state. A study tool has one user; serialise rather than pretend otherwise.
+        # One InferRequest per model, so concurrent questions corrupt each other. A study
+        # tool has one user; serialise rather than pretend otherwise.
         self.lock = threading.Lock()
 
     def meta(self) -> dict[str, Any]:
@@ -117,11 +109,10 @@ class Backend:
 
 
 def citations_of(result: AnswerResult, registry: DocRegistry) -> list[dict[str, Any]]:
-    """Verified citations only — `answer/cite.py` has already dropped invented markers.
+    """Verified citations only — `answer/cite.py` already dropped invented markers.
 
-    Numbered by position in `result.context`, **not** by position in the citation list: §4's
-    contract is that `[n]` is the n-th block the model was shown. An answer citing only `[3]`
-    must render as `[3]`, or the superscript in the text points at the wrong source.
+    Numbered by position in `result.context`, not in the citation list: §4 says `[n]` is the
+    n-th block the model saw, so an answer citing only `[3]` must render as `[3]`.
     """
     numbers = {id(hit): i for i, hit in enumerate(result.context, start=1)}
     out = []
@@ -153,8 +144,8 @@ def citations_of(result: AnswerResult, registry: DocRegistry) -> list[dict[str, 
 def snippet_of(text: str) -> str:
     """The head of the cited block, so grounding is legible without opening the PDF.
 
-    Sliced on characters rather than words: Chinese has no spaces, and a word-based trim
-    would return the whole block for zh and a fragment for en off the same number.
+    Sliced on characters, not words — Chinese has no spaces, so one word count would return
+    a whole block for zh and a fragment for en.
     """
     flat = " ".join(text.split())
     return flat if len(flat) <= SNIPPET_CHARS else flat[:SNIPPET_CHARS].rstrip() + "…"
@@ -255,15 +246,13 @@ class Handler(BaseHTTPRequestHandler):
                 "tier": result.tier,
                 "tier_label": result.tier_label,
                 "abstained": result.abstained,
-                # Two different failures wearing one word (BLOCKERS #17): nothing scored
-                # above tau, versus the model refusing pages that did. The card says which.
+                # Two failures wearing one word (BLOCKERS #17): nothing above tau, versus
+                # the model refusing pages that cleared it. The card says which.
                 "model_abstained": result.model_abstained,
-                # Markers the model wrote that pointed at nothing. The draft on screen still
-                # has them; saying how many were removed is the difference between an answer
-                # that looks clean and one that is shown to have been checked.
+                # Markers that pointed at nothing. The draft on screen still shows them, so
+                # the count is the difference between looking clean and being checked.
                 "dropped": result.markers_emitted - result.markers_grounded,
-                # §9: the disclaimer is what marks an answer ungrounded; `Answer` has no
-                # tier field, so the UI reads the same signal the contract defines.
+                # §9: `Answer` has no tier field, so the disclaimer is the signal.
                 "ungrounded": TIER3_DISCLAIMER in result.answer.text,
                 "citations": citations_of(result, b.registry),
                 "telemetry": telemetry_of(result),

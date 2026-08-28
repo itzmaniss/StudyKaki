@@ -1,10 +1,9 @@
 """Performance bench — ARCHITECTURE.md §5.
 
-Prints TTFT, tok/s, peak RSS and per-stage latency **per device that actually exists on this
-host**. §5 asks for "CPU and GPU"; this file does not fabricate the second column. A device
-OpenVINO does not report is printed as `unavailable`, never as a zero, and the header says
-which machine produced the numbers — an M4 Pro flatters an i5 badly enough to make a slide
-dishonest (BLOCKERS.md #1).
+TTFT, tok/s, peak RSS and per-stage latency, per device that actually exists on this host.
+§5 asks for CPU and GPU; a device OpenVINO does not report prints `unavailable`, never a
+zero. The header names the machine — an M4 Pro flatters an i5 enough to make a slide
+dishonest (BLOCKERS #1).
 
     uv run python -m eval.bench --config configs/base.yaml
     uv run python -m eval.bench --traces data/traces/2026-08-22.parquet
@@ -47,8 +46,7 @@ UNAVAILABLE = "unavailable"
 class GenerationSample:
     """One generate() call's timings.
 
-    `resolved_device` is where the model *actually* ran after fallback (§7.4) — it is not
-    always the device that was asked for, and a bench that hides that is lying.
+    `resolved_device` is where the model ran after fallback (§7.4), not what was asked for.
     """
 
     ttft_ms: float
@@ -82,10 +80,9 @@ class IngestProbe(Protocol):
 
 
 def _ru_maxrss_to_bytes(ru_maxrss: int, platform_name: str) -> int:
-    """macOS reports `ru_maxrss` in **bytes**, Linux in **kilobytes**.
+    """macOS reports `ru_maxrss` in bytes, Linux in kilobytes.
 
-    Assuming either one universally is a silent 1024x error, in the direction that makes the
-    pitch look best on exactly one of the two platforms.
+    Assuming either universally is a silent 1024x error.
     """
     return int(ru_maxrss) if platform_name == "darwin" else int(ru_maxrss) * 1024
 
@@ -108,8 +105,8 @@ class _ProcessMemoryCounters(ctypes.Structure):
 
 
 def _peak_rss_bytes_windows() -> int:
-    # Untyped, GetCurrentProcess()'s pseudo-handle (-1) truncates under ctypes' default
-    # c_int marshalling and GetProcessMemoryInfo then fails with ERROR_INVALID_HANDLE.
+    # Untyped, the (-1) pseudo-handle truncates under ctypes' c_int marshalling and
+    # GetProcessMemoryInfo fails with ERROR_INVALID_HANDLE.
     kernel32 = ctypes.windll.kernel32
     psapi = ctypes.windll.psapi
     kernel32.GetCurrentProcess.restype = ctypes.wintypes.HANDLE
@@ -315,8 +312,8 @@ class BenchReport:
 def discover_devices() -> tuple[tuple[str, str], ...]:
     """`(name, full_name)` exactly as OpenVINO reports them.
 
-    Imported lazily: `import openvino` costs a second, and this module must stay importable
-    (and its table renderable) on a machine where the runtime is broken.
+    Lazy import: `import openvino` costs a second, and the table must render on a machine
+    where the runtime is broken.
     """
     try:
         import openvino as ov
@@ -412,8 +409,7 @@ def bench_device(device: str, available: bool, probe: GenerationProbe | None) ->
         tokens_per_s=sample.tokens_per_s,
         n_tokens=sample.n_tokens,
         resolved_device=sample.resolved_device or device,
-        # Process high-water mark sampled after this device's run — monotonic, so it reads as
-        # "peak so far", not "peak attributable to this device".
+        # Monotonic high-water mark: "peak so far", not "peak from this device".
         peak_rss_bytes=peak_rss_bytes(),
     )
 
@@ -462,9 +458,8 @@ def _sample_from_metrics(
     elapsed_s: float,
     budget: int,
 ) -> GenerationSample:
-    """Prefer GenAI's own perf counters — they separate prefill from decode, which a wall
-    clock around `generate()` cannot. The wall-clock path is the fallback for a build that
-    reports no metrics, and it can only claim TTFT == total time."""
+    """Prefer GenAI's perf counters — they separate prefill from decode, which a wall clock
+    around `generate()` cannot. The fallback can only claim TTFT == total time."""
     if metrics is None:
         return GenerationSample(
             ttft_ms=elapsed_s * 1000.0,
@@ -489,10 +484,9 @@ def registry_generation_probe(
 ) -> GenerationProbe:
     """Real TTFT / tok/s from the configured generator, through OpenVINO GenAI.
 
-    Greedy, not sampled: tok/s is unaffected by sampling but run-to-run variance is, and a
-    bench that moves under a fixed config is not a bench. If the model has not been converted
-    yet the probe raises, and `bench_device` reports that failure verbatim — §0.5 makes a
-    fabricated number worse than a missing one.
+    Greedy, not sampled: sampling does not move tok/s but does move run-to-run variance, and
+    a bench that drifts under a fixed config is not a bench. An unconverted model raises and
+    `bench_device` reports it verbatim (§0.5).
     """
     from models.registry import ModelNotFound, load_manifest, select_device
 
@@ -500,8 +494,8 @@ def registry_generation_probe(
     wanted = cfg.models.generator.name
 
     def probe(device: str) -> GenerationSample:
-        # Resolved by config name, not by role: §6 makes `configs/base.yaml` the source of
-        # truth, and `by_name` names the missing model and the command that produces it.
+        # By config name, not role (§6), and `by_name` names the missing model and the
+        # command that produces it.
         entry = load_manifest(manifest_path).by_name(wanted)
         if not entry.is_converted:
             raise ModelNotFound(
@@ -533,9 +527,8 @@ def registry_generation_probe(
 def traces_ingest_probe(path: Path) -> IngestProbe:
     """Per-stage latency from recorded traces (`core/telemetry.py`).
 
-    Deliberately not an import of `ingest/pipeline.py`: the traces file already holds real
-    stage timings from real runs, so bench stays decoupled from the pipeline's API and
-    reports what actually happened rather than a synthetic re-run.
+    Not an import of `ingest/pipeline.py`: the traces hold real timings from real runs, so
+    bench stays decoupled and reports what happened rather than a synthetic re-run.
     """
 
     def probe() -> IngestResult:

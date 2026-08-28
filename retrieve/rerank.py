@@ -1,13 +1,11 @@
 """Cross-encoder rerank — §10 (V2, largest expected precision gain).
 
-Dense/hybrid retrieves k=20, the cross-encoder scores each (query, chunk) pair properly, and
-the top `n` survive. Bi-encoders embed query and chunk separately; a cross-encoder reads them
-together, which is why it is more accurate and why it costs 20 forward passes per query.
+Dense/hybrid retrieves k=20, the cross-encoder scores each (query, chunk) pair together
+rather than separately, and the top `n` survive — more accurate, at 20 forward passes.
 
-Ceiling on this corpus is known and small: `eval/baselines/v1.json` records recall@20 ==
-recall@10 == 0.980 and the correct chunk at rank 11-20 exactly zero times, so a *perfect*
-reranker over top-20 buys +0.082 recall@5 and nothing more. §10's `top_n` exists to spend
-less for most of that.
+The ceiling here is known and small: `eval/baselines/v1.json` has recall@20 == recall@10 ==
+0.980 with the correct chunk at rank 11-20 exactly zero times, so a perfect reranker over
+top-20 buys +0.082 recall@5 and no more. `top_n` spends less for most of that.
 """
 
 from __future__ import annotations
@@ -41,10 +39,9 @@ def load_reranker(
 ) -> tuple[Any, Any, str, str]:
     """Compile the cross-encoder and its pair tokenizer, with the §7.4 device fallback.
 
-    Not `openvino_genai.TextRerankPipeline`: that compiles its own tokenizer with no way to
-    pass a precision hint, so on arm64 it loads fine and then dies on every call with
-    "element type f16, is not representable as pointer to f32" (BLOCKERS #1, #13). Driving
-    the model directly is the same fix ingest/embed.py already uses for the embedder.
+    Not `TextRerankPipeline`: it compiles its own tokenizer with no precision hint, so on
+    arm64 it loads and then dies on every call (BLOCKERS #1, #13). Driving the model
+    directly is the fix `ingest/embed.py` already uses.
     """
     import openvino as ov
     import openvino_tokenizers as ovt
@@ -131,8 +128,8 @@ class RerankingRetriever:
         self.tokenizer = tokenizer
         self.name = name
         self.device = device
-        #: Queries where the cross-encoder threw and we returned the inner ranking. Read by
-        #: eval/sweep.py, which will not report metrics for an arm that degraded.
+        #: Queries where the cross-encoder threw and we returned the inner ranking.
+        #: `eval/sweep.py` will not report metrics for an arm that degraded.
         self.degraded_calls = 0
 
     def retrieve(self, query: str, k: int) -> list[Retrieved]:
@@ -140,8 +137,7 @@ class RerankingRetriever:
             raise ValueError(f"k must be >= 1, got {k}")
 
         top_n = self.cfg.retrieve.rerank.top_n
-        # Ask the inner arm for the full k. Reranking a truncated list cannot recover a chunk
-        # the first stage never returned, so the candidate pool is what bounds quality.
+        # Full k: reranking cannot recover a chunk the first stage never returned.
         hits = self.inner.retrieve(query, k)
         if len(hits) < 2:
             return hits

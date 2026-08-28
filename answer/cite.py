@@ -1,16 +1,15 @@
 """Citation verification — ARCHITECTURE.md §4, §0.6.
 
-The model will invent citation markers. §4 is explicit: *strip any `[n]` the model invented*.
-A marker is valid only when `n` indexes a block that was actually in the context we handed
-the model, so `[7]` against five context blocks is a fabrication and never reaches the user.
+Models invent citation markers, and §4 says strip them. A marker is valid only when `n`
+indexes a block that was in the context we handed the model, so `[7]` against five blocks
+never reaches the user.
 
-**Numbering contract, shared with `answer/prompt.py`:** block `[n]` is `context_hits[n - 1]`,
-i.e. 1-indexed *position in the list passed to the prompt builder* — not `Retrieved.rank`.
-Both modules must be given the same list, in the same order, or citations point at the wrong page.
+Numbering contract, shared with `answer/prompt.py`: `[n]` is `context_hits[n - 1]` — position
+in the list passed to the prompt builder, not `Retrieved.rank`. Same list, same order, or
+citations point at the wrong page.
 
-Markers inside code spans and fenced code blocks are left untouched: `arr[1]` is array
-indexing, not a citation, and rewriting it would corrupt the answer. Such a marker never
-renders as a citation either, so it cannot mislead anyone.
+Markers inside code spans and fences are left alone: `arr[1]` is indexing, it never renders
+as a citation, and rewriting it would corrupt the answer.
 """
 
 from __future__ import annotations
@@ -19,13 +18,13 @@ import re
 
 from core.schema import Retrieved
 
-# `[1]`, `[01]`, `[1, 2]`, `[1,2]` — models emit all of these. Anything non-numeric
-# (`[abc]`, `[^1]`, a markdown link label) is not a citation marker and is left alone.
+# `[1]`, `[01]`, `[1, 2]`, `[1,2]` — models emit all of these. Non-numeric brackets are
+# not citation markers and are left alone.
 _MARKER_RE = re.compile(r"\[[ \t]*(?P<nums>\d+(?:[ \t]*,[ \t]*\d+)*)[ \t]*\]")
 _NUM_RE = re.compile(r"\d+")
 
-# Placeholder standing where a dropped marker was, so whitespace can be repaired without
-# touching text we did not modify (markdown hard line breaks are two trailing spaces).
+# Stands where a dropped marker was, so whitespace repairs do not touch untouched text
+# (markdown hard line breaks are two trailing spaces).
 _SENT = "\x00"
 _CLOSERS = r"\s,.;:!?)\]}»”’、。，．！？：；）】」』"
 _DROP_AT_LINE_START = re.compile(r"(?m)^(?P<ind>[ \t]*)" + _SENT + r"[ \t]*")
@@ -36,12 +35,10 @@ _DROP_REST = re.compile(r"[ \t]*" + _SENT + r"[ \t]*")
 def verify(answer_text: str, context_hits: list[Retrieved]) -> tuple[str, list[Retrieved]]:
     """Drop invented citation markers and report the citations actually referenced.
 
-    Returns `(clean_text, used_citations)`. Every `[n]` surviving in `clean_text` is
-    canonical (one number per bracket) and indexes a real context block, so a renderer
-    can trust `\\[(\\d+)\\]` without re-validating. `used_citations` is deduplicated and
-    ordered by block number, so it reads as a relevance-ordered source list.
-
-    Text containing only valid canonical markers is returned unchanged.
+    Returns `(clean_text, used_citations)`. Every surviving `[n]` is canonical — one number
+    per bracket, indexing a real block — so a renderer can trust it without re-validating.
+    `used_citations` is deduped and ordered by block number. Already-clean text is returned
+    unchanged.
     """
     hits = _check_hits(context_hits)
     if not isinstance(answer_text, str):

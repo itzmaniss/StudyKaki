@@ -1,12 +1,10 @@
-"""Per-query telemetry — ARCHITECTURE.md §0.1 (`data/traces/<date>.parquet`), §9 (answer tier).
+"""Per-query telemetry — ARCHITECTURE.md §0.1, §9.
 
-A trace is the row that explains one answer: which stages ran and how long each took, which
-device every model actually landed on *after* fallback (§7.4), what the retriever's best score
-was, whether we abstained (§0.6), and which tier the user was shown (§9 requires the tier to be
-visible on every answer — it is recorded here so the UI never has to guess).
+One row explaining one answer: stages and their durations, the device every model landed on
+after fallback (§7.4), the retriever's best score, whether we abstained (§0.6), and the tier
+shown (§9), so the UI never has to guess.
 
-`trace_id` is the join key: the same string is carried on `Answer.trace_id`, so any rendered
-answer can be traced back to the run that produced it.
+`trace_id` is the join key, carried on `Answer.trace_id`.
 """
 
 from __future__ import annotations
@@ -37,8 +35,8 @@ TIER_LABELS: dict[int, str] = {
     TIER_PARAMETRIC: "general knowledge",
 }
 
-# Written explicitly rather than inferred: a trace with no stages or no devices would otherwise
-# infer as List(Null) and fail to concat with the rest of the day's file.
+# Explicit, not inferred: an empty stages/devices list infers as List(Null) and fails to
+# concat with the rest of the day's file.
 TRACE_SCHEMA: dict[str, Any] = {
     "trace_id": pl.Utf8,
     "started_at": pl.Datetime("us", "UTC"),
@@ -77,9 +75,9 @@ class StageTiming:
 
 @dataclass(frozen=True)
 class DeviceUse:
-    """`requested` is what `configs/base.yaml` asked for, `device` is what the load actually got.
+    """`requested` is what the config asked for, `device` is what the load got.
 
-    Keeping both is the only way a silent CPU fallback (§7.4) is visible after the fact.
+    Both, because that is the only way a silent CPU fallback (§7.4) stays visible.
     """
 
     model: str

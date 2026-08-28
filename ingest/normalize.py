@@ -2,13 +2,11 @@
 
 Unicode NFC, per-block script detection, join hyphen-broken lines, collapse whitespace.
 
-Script detection is not cosmetic: it decides how `ingest/chunk.py` counts tokens (characters
-for CJK/Thai, whitespace tokens elsewhere) and how lines are rejoined (no space between CJK
-lines). Getting it wrong silently halves or doubles every chunk in a document.
+Script detection is not cosmetic: it decides how `ingest/chunk.py` counts tokens and how
+lines are rejoined. Wrong, it silently halves or doubles every chunk in a document.
 
-Deliberately *not* stripped: ZWJ/ZWNJ (U+200C/U+200D) are semantically load-bearing in
-Devanagari and Tamil, and ZWSP (U+200B) carries word boundaries in Thai. Only the BOM and
-the soft hyphen — which is by definition a line-breaking artefact — are removed.
+Not stripped: ZWJ/ZWNJ are load-bearing in Devanagari and Tamil, ZWSP carries Thai word
+boundaries. Only the BOM and the soft hyphen — a line-breaking artefact by definition — go.
 """
 
 from __future__ import annotations
@@ -33,8 +31,7 @@ _SOFT_HYPHEN = "\u00ad"
 _BOM = "\ufeff"
 _STRIP_CHARS = str.maketrans("", "", _SOFT_HYPHEN + _BOM)
 
-# CJK and Thai are not space-delimited, so rejoining their lines with a space injects
-# separators that were never in the source.
+# Not space-delimited, so rejoining with a space injects separators the source never had.
 NO_SPACE_SCRIPTS = frozenset({"hans", "hant", "jpan", "thai"})
 
 # Only these scripts hyphenate across a line break in practice.
@@ -54,8 +51,8 @@ _SCRIPT_LANG: dict[str, str] = {
     "unknown": "und",
 }
 
-# (start, end_inclusive, bucket). `han`/`kana`/`hang` are resolved into jpan/kore/hans/hant
-# by `_resolve`, because a codepoint alone cannot tell those four apart.
+# (start, end_inclusive, bucket). `_resolve` folds han/kana/hang into jpan/kore/hans/hant —
+# a codepoint alone cannot tell those four apart.
 _RANGES: tuple[tuple[int, int, str], ...] = (
     (0x0041, 0x005A, "latn"),
     (0x0061, 0x007A, "latn"),
@@ -84,8 +81,7 @@ _RANGES: tuple[tuple[int, int, str], ...] = (
 )
 _RANGE_STARTS: tuple[int, ...] = tuple(lo for lo, _, _ in _RANGES)
 
-# Characters that exist in only one of the two Chinese orthographies. A handful of hits is
-# enough to decide; with no hits at all, simplified is the safer default by corpus volume.
+# Present in only one Chinese orthography. A few hits decide it; none defaults simplified.
 _SIMPLIFIED_ONLY = frozenset("国见说会学时这个们为对关后万与书电车东门问长风飞马鸟龙华汉")
 _TRADITIONAL_ONLY = frozenset("國見說會學時這個們為對關後萬與書電車東門問長風飛馬鳥龍華漢")
 
@@ -100,12 +96,10 @@ def _bucket(ch: str) -> str | None:
 
 
 def script_histogram(text: str) -> dict[str, int]:
-    """Character counts per raw script bucket, for callers that need the mix, not the winner.
+    """Character counts per raw script bucket, for callers wanting the mix, not the winner.
 
-    Buckets are unresolved: `han`, `kana` and `hang` are reported as themselves rather than
-    folded into `hans`/`jpan`/`kore`, because that decision needs the whole string (see
-    `_resolve`). Characters carrying no script — digits, punctuation, whitespace — are absent,
-    so the counts sum to at most `len(text)`.
+    Unresolved: `han`/`kana`/`hang` report as themselves, since folding them needs the whole
+    string (`_resolve`). Script-less characters are absent, so counts sum to <= `len(text)`.
     """
     counts: dict[str, int] = {}
     for ch in text:

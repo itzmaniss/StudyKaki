@@ -1,21 +1,18 @@
 """One-time offline setup: download checkpoints, convert to OpenVINO IR, warm the cache.
 
-**This is the only module in the repo permitted to touch the network** (ARCHITECTURE.md
-§0.3). `models/convert.py` reads the local Hugging Face cache and refuses to download;
-everything under `ingest/`, `retrieve/` and `answer/` must work with the network off.
-If you find a runtime import reaching out, that is a bug, not a feature.
+The only module permitted to touch the network (§0.3). Everything under `ingest/`,
+`retrieve/` and `answer/` must work with it off; a runtime import that reaches out is a bug.
 
     uv run python -m scripts.setup                 # everything in configs/base.yaml
     uv run python -m scripts.setup --only embedder
     uv run python -m scripts.setup --skip-warm     # CI / low-disk
 
-To repair a tokenizer without re-quantising the weights (which would change `ir_sha256`
-and invalidate every existing index, §3.1 rule 4):
+To repair a tokenizer without re-quantising (which would change `ir_sha256` and invalidate
+every index, §3.1 rule 4):
 
     uv run python -m models.convert --only embedder --tokenizer-only
 
-Each model is independent: one failure is reported and the rest still run, because a
-missing generator should not stop you from indexing.
+Models are independent: one failure is reported and the rest still run.
 """
 
 from __future__ import annotations
@@ -68,8 +65,7 @@ def download(name: str, cfg: Config) -> Path:
 def warm_cache(name: str, cfg: Config, manifest_path: Path) -> str:
     """Compile once so the first real query does not pay for it (§7.2).
 
-    Returns the device actually obtained, which is also the honest answer to
-    "did the GPU intent in base.yaml survive contact with this machine?" (§7.4).
+    Returns the device actually obtained — whether base.yaml's intent survived (§7.4).
     """
     loaded = load_model(name, cfg, manifest_path=manifest_path)
     log.info(

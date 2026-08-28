@@ -1,20 +1,17 @@
 """Download the evaluation corpus — ARCHITECTURE.md §0.3.
 
-Network access lives in scripts, never in runtime code. This is the second such script
-(`scripts/setup.py` fetches models); nothing under `ingest/`, `retrieve/` or `answer/`
-may reach the network.
+Network access lives in scripts, never runtime code (`scripts/setup.py` is the other one).
 
     uv run python -m scripts.fetch_corpus            # fetch everything missing
     uv run python -m scripts.fetch_corpus --report   # just say what is on disk
     uv run python -m scripts.fetch_corpus --lang ta
 
-Idempotent: a file that already exists and starts with `%PDF` is skipped, so a partial
-run can simply be repeated. Corpus lives under `data/`, which is gitignored — none of
-this enters the repo.
+Idempotent: an existing file starting with `%PDF` is skipped, so a partial run repeats
+safely. The corpus lives under gitignored `data/`.
 
-Every entry reports whether it carries a native text layer, because that decides whether
-`ingest/ocr.py` runs at all (§3: a text layer means OCR is skipped entirely). The corpus
-needs genuine image-only scans or the OCR stage is never exercised on real data.
+Every entry reports whether it has a native text layer, since that decides whether
+`ingest/ocr.py` runs at all (§3) — the corpus needs real image-only scans or OCR is never
+exercised on real data.
 """
 
 from __future__ import annotations
@@ -50,9 +47,8 @@ def _archive(identifier: str, filename: str) -> str:
     return f"https://archive.org/download/{identifier}/{urllib.parse.quote(filename)}"
 
 
-# Tamil/English Std12 Computer Science are the *same textbook in two languages*, which is
-# what makes the §5 cross-lingual questions possible: a Tamil question whose answer lives
-# in the English volume, and vice versa. BGE-M3 is built for exactly this.
+# Std12 CS is the same textbook in two languages — what makes §5's cross-lingual questions
+# possible: a Tamil question answered from the English volume, and vice versa.
 SOURCES: tuple[Source, ...] = (
     Source(
         "std12_cs_vol1_ta",
@@ -90,8 +86,7 @@ SOURCES: tuple[Source, ...] = (
         "https://www.cnnic.net.cn/NMediaFile/2023/0807/MAIN1691372884990HDTP1QOST8.pdf",
         "CNNIC 中国互联网络发展状况统计报告 — dense IPv4/IPv6 and broadband tables",
     ),
-    # ITU publishes the same document per UN language, suffixed -C (Chinese) and -E (English),
-    # which makes them a second parallel pair for cross-lingual questions.
+    # ITU publishes per UN language, -C and -E: a second parallel pair.
     Source(
         "itu_wtdc22_zh",
         "zh",

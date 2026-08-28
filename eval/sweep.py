@@ -40,8 +40,8 @@ class SweepRow:
     result: EvalResult | None
     seconds: float
     skipped: str = ""
-    #: Queries where an arm silently fell back. Non-zero means the metrics below describe
-    #: whatever ran instead of this arm, so they are not reported as a result.
+    #: Queries where an arm silently fell back. Non-zero means the metrics describe
+    #: whatever ran instead, so they are not reported.
     degraded: int = 0
 
     @property
@@ -147,8 +147,7 @@ def as_table(rows: list[SweepRow], baseline: dict[str, Any], n_questions: int = 
             out.append(f"{row.label:<22}{'skipped: ' + row.skipped:>45}")
             continue
         if row.degraded:
-            # Never print a number an arm did not produce. A silent fallback reads exactly
-            # like a real measurement otherwise — see retriever.degraded_calls.
+            # Never print a number an arm did not produce — see retriever.degraded_calls.
             out.append(
                 f"{row.label:<24}{f'DEGRADED on {row.degraded}/{n} queries - arm did not run':>55}"
             )

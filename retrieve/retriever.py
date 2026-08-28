@@ -24,12 +24,11 @@ def abstains(hits: list[Retrieved], tau: float) -> bool:
 
 
 def abstain_score(hits: list[Retrieved], retriever: object | None = None) -> float:
-    """The score to compare against tau — always on the cosine scale (BLOCKERS #12).
+    """The score to compare against tau — always cosine (BLOCKERS #12).
 
-    `tau` is calibrated against dense cosine similarity and its safe window is 0.01 wide
-    (BLOCKERS #8). An arm that returns scores in other units — RRF, cross-encoder logits —
-    must therefore hand back a cosine score for the abstain decision or the gate is
-    meaningless. Arms do that by exposing `abstain_top_score`.
+    tau is calibrated on dense cosine and its safe window is 0.01 wide (#8), so an arm
+    scoring in other units (RRF, cross-encoder logits) must hand back a cosine score via
+    `abstain_top_score` or the gate is meaningless.
     """
     override = getattr(retriever, "abstain_top_score", None)
     if override is not None:
@@ -51,11 +50,10 @@ def abstains_for(
 def degraded_calls(retriever: object | None) -> int:
     """Queries where an arm silently fell back instead of doing its job.
 
-    Exists because a silent fallback is indistinguishable from a real measurement in a
-    results table: `TextRerankPipeline` threw on all 54 questions, the rerank arm degraded to
-    its inner ranking, and the sweep printed the baseline number as if rerank had been
-    evaluated. Any arm that can degrade counts it; `eval/sweep.py` refuses to report a row
-    whose count is non-zero.
+    A silent fallback is indistinguishable from a real measurement in a results table:
+    `TextRerankPipeline` threw on all 54 questions, the arm degraded to its inner ranking,
+    and the sweep printed the baseline as if rerank had run. `eval/sweep.py` refuses any row
+    with a non-zero count.
     """
     own = int(getattr(retriever, "degraded_calls", 0) or 0)
     inner = getattr(retriever, "inner", None)

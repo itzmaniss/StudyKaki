@@ -1,12 +1,11 @@
 """Conditional query rewrite — §10 (V2, rewrite arm).
 
-§10: trigger **only** when the query is short (< `trigger_max_tokens`) or carries an
-unresolved pronoun. Rewriting everything costs a 2-4s generation round-trip per query and
-§10 warns it can destroy BGE-M3's cross-lingual signal.
+Triggers only on a short query or an unresolved pronoun. Rewriting everything costs a 2-4s
+round-trip per query and can destroy BGE-M3's cross-lingual signal.
 
-Expect no win on the current golden set: every question there is a well-formed standalone,
-so the trigger almost never fires. That is a legitimate result, not a bug — this arm is for
-conversational follow-ups the golden set does not contain.
+Expect no win on the current golden set — every question there is a well-formed standalone,
+so the trigger almost never fires. This arm is for conversational follow-ups the set does
+not contain.
 """
 
 from __future__ import annotations
@@ -24,9 +23,8 @@ from retrieve.retriever import Retriever
 
 log = structlog.get_logger("retrieve.rewrite")
 
-#: Pronouns/deictics that usually point at earlier turns. English only — the corpus languages
-#: that matter here (ta, zh) drop pronouns rather than stranding them, so a word list would
-#: mostly produce false positives.
+#: Deictics that usually point at earlier turns. English only — ta and zh drop pronouns
+#: rather than stranding them, so a word list would mostly false-positive.
 _DANGLING = frozenset(
     {
         "it",
@@ -108,8 +106,8 @@ class RewritingRetriever:
 
         started = time.perf_counter()
         rewritten = _clean(self.rewriter(query))
-        # An empty or runaway rewrite means the model ignored the instruction. Original wins:
-        # a bad rewrite is worse than no rewrite, and §10 gates this arm on measurement.
+        # Empty or runaway means the model ignored the instruction, and a bad rewrite is
+        # worse than none.
         if not rewritten or len(rewritten) > 4 * len(query) + 80:
             self.degraded_calls += 1
             log.warning(

@@ -1,22 +1,18 @@
-"""Terminal UI — ARCHITECTURE.md §1 (thin, no logic here), §9 (tier visible on every answer).
+"""Terminal UI — ARCHITECTURE.md §1 (thin), §9 (tier visible on every answer).
 
-Rendering only. Retrieval, the `tau` threshold, tier selection, citation verification and
-telemetry all happen in `retrieve/` and `answer/`. This module turns one `AnswerResult` into
-characters and decides nothing about an answer.
+Rendering only: retrieval, `tau`, tier selection, citation verification and telemetry all
+live in `retrieve/` and `answer/`. This turns one `AnswerResult` into characters.
 
-A terminal rather than a browser: §0.1 pins the dependency set and holds no GUI framework,
-and §0.3 forbids the network at runtime. Citations are clickable the way a terminal makes
-things clickable — an OSC 8 hyperlink to `file://…#page=N`, which opens the student's own
-PDF at the cited page, offline, in every terminal that supports the escape (iTerm2, VS Code,
-GNOME Terminal) and degrades to plain text everywhere else.
+A terminal, not a browser — §0.1 carries no GUI framework and §0.3 forbids the network.
+Citations are OSC 8 hyperlinks to `file://…#page=N`, opening the student's own PDF at the
+cited page offline, degrading to plain text where the escape is unsupported.
 
-§9's Tier 3 contract is *enforced* in `answer/prompt.py`; what this file owes it is
-*visibility*: a warning-framed block, the literal disclaimer carried through untouched, no
-citation list, and Tier 1's abstention said out loud before the ungrounded answer.
+§9's Tier 3 contract is enforced in `answer/prompt.py`; this file owes it visibility — a
+warning frame, the disclaimer untouched, no citation list, and Tier 1's abstention stated
+before the ungrounded answer.
 
-Streaming deltas are provisional — `answer/cite.py` runs after the last token. The draft is
-streamed for responsiveness and the verified answer is reprinted only when verification
-actually changed it, so the common case shows one answer, not two.
+Streaming deltas are provisional (`answer/cite.py` runs after the last token), so the
+verified answer is reprinted only when verification changed it.
 """
 
 from __future__ import annotations
@@ -35,9 +31,8 @@ import structlog
 from answer.cite import find_markers
 from answer.generate import AnswerResult, GenerationError, stream_answer
 
-# `_provenance` is the renderer `answer/prompt.py` used for the block header the model saw.
-# Reusing it means the `doc / p.N` printed under an answer is the string the model was
-# citing, rather than a second format that can drift away from it.
+# The same renderer `answer/prompt.py` used for the header the model saw, so `doc / p.N`
+# under an answer is the string it was citing rather than a format that can drift.
 from answer.prompt import _provenance as provenance
 from core.config import DEFAULT_CONFIG, Config, load_config
 from core.schema import Chunk
@@ -80,10 +75,10 @@ class Style:
 
 @dataclass(frozen=True)
 class DocRegistry:
-    """`doc_id` -> the file it came from, so a citation can name and open the real document.
+    """`doc_id` -> the file it came from, so a citation can name and open the document.
 
-    Built by hashing the source files with `ingest.load.doc_id_for` — the same sha256 of
-    file bytes that became `Document.doc_id`, so nothing here has to be kept in sync.
+    Hashed with `ingest.load.doc_id_for` — the same sha256 that became `Document.doc_id`,
+    so nothing needs keeping in sync.
     """
 
     names: dict[str, str] = field(default_factory=dict)
@@ -126,10 +121,10 @@ def tier_line(result: AnswerResult, style: Style) -> str:
 
 
 def citation_lines(result: AnswerResult, registry: DocRegistry, style: Style) -> list[str]:
-    """`[n] doc / p.N`, clickable, numbered as the model saw the block (§4 numbering contract).
+    """`[n] doc / p.N`, clickable, numbered as the model saw the block (§4).
 
-    Tier 3 never reaches here with citations: `answer/prompt.py` strips its markers and
-    leaves the list empty, and §9 forbids inventing one.
+    Tier 3 never arrives with citations — `prompt.py` strips its markers, and §9 forbids
+    inventing a list.
     """
     numbers = {id(hit): i + 1 for i, hit in enumerate(result.context)}
     lines: list[str] = []
@@ -220,9 +215,8 @@ class Session:
     style: Style = field(default_factory=Style)
     tier3_enabled: bool = False
     show_trace: bool = False
-    #: Echo tokens as they arrive. Off, only verified text is ever printed — a raw draft can
-    #: carry a citation marker that `answer/cite.py` is about to remove, which is worth
-    #: trading TTFT away for when the screen is being recorded.
+    #: Echo tokens as they arrive. Off prints only verified text — worth the TTFT when the
+    #: screen is being recorded, since a draft can show a marker `cite.py` will remove.
     stream_draft: bool = True
 
     def ask(self, question: str, out: TextIO) -> AnswerResult:
@@ -341,8 +335,8 @@ def colour_enabled(no_color: bool, out: TextIO) -> bool:
 def configure_logging(verbose: bool = False) -> None:
     """Send `structlog` to stderr and quieten it — here, stdout is the answer.
 
-    Called from `main()` and nowhere else: importing this module must not reconfigure
-    logging for `eval/run.py` or the ingest pipeline, whose stdout is not a display.
+    Called from `main()` only: importing must not reconfigure logging for `eval/run.py` or
+    the pipeline, whose stdout is not a display.
     """
     structlog.configure(
         wrapper_class=structlog.make_filtering_bound_logger(

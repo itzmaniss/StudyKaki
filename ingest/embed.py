@@ -1,20 +1,15 @@
 """BGE-M3 INT8 embeddings through OpenVINO — ARCHITECTURE.md §3 `embed`, §3.1, §7.5.
 
-Three rules from the contract shape everything here:
+* Batch 16–32, never one call per chunk — a per-chunk loop pays full graph overhead for one
+  row and is ~10x slower for no benefit (§7.5).
+* The fingerprint decides the maths, not this module. `pooling`, `normalize`, `max_len` and
+  the prefixes come from the manifest (§3.1 rule 3); hardcoding BGE-M3's empty prefixes
+  would destroy retrieval the day an E5-family model is swapped in.
+* Vectors cache as `.npy`, never parquet (§0.1), keyed on
+  `(text hash, stage_version, fingerprint hash)`. A cache hit never compiles the IR.
 
-* **Batch 16–32, never one call per chunk.** A per-chunk `embed()` loop pays the full
-  graph-execution overhead for a single row of work and is ~10x slower for no benefit (§7.5).
-* **The fingerprint decides the maths, not this module.** `pooling`, `normalize`, `max_len`,
-  `query_prefix` and `passage_prefix` are read from the model manifest (§3.1 rule 3). Hardcoding
-  BGE-M3's empty prefixes here would silently destroy retrieval the day someone swaps in an
-  E5-family model, whose asymmetric `query: ` / `passage: ` prefixes must travel with the index.
-* **Vectors are cached as `.npy`, never parquet** (§0.1). The cache key is
-  `(text hash, stage_version, fingerprint hash)`, so re-embedding only happens when the text or
-  the embedder actually changed — and a cache hit never compiles the 544 MB IR at all.
-
-`embed_queries` and `embed_passages` are separate entry points for one reason: they apply
-different prefixes. Everything downstream of that is byte-identical, which is what makes
-query-time and index-time vectors comparable.
+`embed_queries` and `embed_passages` differ only in prefix; everything after is identical,
+which is what makes query- and index-time vectors comparable.
 """
 
 from __future__ import annotations
@@ -55,10 +50,9 @@ INPUT_IDS = "input_ids"
 ATTENTION_MASK = "attention_mask"
 TOKEN_TYPE_IDS = "token_type_ids"
 
-#: openvino_tokenizers' custom ops are reference implementations that read their weights as
-#: f32. On arm64 the CPU plugin's default INFERENCE_PRECISION_HINT is f16, which makes them
-#: fail with "element type f16, is not representable as pointer to f32". Pinning the hint on
-#: the *tokenizer* compile costs nothing on Intel and keeps the stack loadable everywhere.
+#: openvino_tokenizers' custom ops read weights as f32, but arm64's CPU plugin defaults the
+#: hint to f16 and they fail with "element type f16, is not representable as pointer to
+#: f32". Pinning it on the tokenizer compile costs nothing on Intel.
 TOKENIZER_OV_CONFIG = {"INFERENCE_PRECISION_HINT": "f32"}
 
 
@@ -79,8 +73,8 @@ class Tokenizer(Protocol):
 class OVTokenizer:
     """The `openvino_tokenizer.xml` written next to the model IR by `models/convert.py`.
 
-    Kept behind the `Tokenizer` protocol so tests can substitute a trivial one: the real
-    tokenizer IR is 22 MB and lives beside weights that are not committed (§7.3).
+    Behind the `Tokenizer` protocol so tests substitute a trivial one — the real IR is 22 MB
+    and sits beside uncommitted weights (§7.3).
     """
 
     def __init__(self, compiled: ov.CompiledModel) -> None:
@@ -104,9 +98,8 @@ class OVTokenizer:
             ) from e
 
         core = core or ov.Core()
-        # Importing the package only extends `ov.Core`s created *after* the import, and the
-        # registry hands us one it made earlier. Registering explicitly makes the load order
-        # irrelevant; without it the read fails with "unsupported opset: extension".
+        # Importing only extends `ov.Core`s created after it, and the registry hands us an
+        # older one. Explicit registration makes load order irrelevant.
         try:
             core.add_extension(str(openvino_tokenizers._ext_path))
         except (RuntimeError, AttributeError) as e:
@@ -119,9 +112,8 @@ class OVTokenizer:
         return cls(compiled)
 
     def __call__(self, texts: Sequence[str]) -> tuple[np.ndarray, np.ndarray]:
-        # A `string` input tensor is filled from a numpy *unicode* array (`<U`). An
-        # `object` array of `str` is rejected with "Unknown string kind passed to fill the
-        # Tensor's data!", and a bare list is read as a scalar and fails the shape check.
+        # A `string` tensor fills from a numpy unicode array (`<U`). An `object` array is
+        # rejected outright, and a bare list reads as a scalar and fails the shape check.
         result = self._request.infer([np.array(list(texts))])
         return (
             np.asarray(result[INPUT_IDS], dtype=np.int64),
@@ -132,8 +124,8 @@ class OVTokenizer:
 class Embedder:
     """A compiled encoder plus the fingerprint that says how to use it.
 
-    Not thread-safe: one `ov.InferRequest` is reused across batches on purpose, because
-    allocating one per batch is measurable at this batch size.
+    Not thread-safe — one `InferRequest` is reused across batches, because allocating per
+    batch is measurable at this size.
     """
 
     def __init__(
@@ -269,8 +261,8 @@ def _l2_normalize(vectors: np.ndarray) -> np.ndarray:
 class VectorCache:
     """`.npy` sibling of `core.cache.StageCache` — §0.1 forbids vectors in parquet.
 
-    Same key, same root, same atomic-replace discipline; only the payload differs. The
-    extension keeps it from ever colliding with a `StageCache` entry in the same stage dir.
+    Same key, root and atomic-replace discipline; the extension prevents collision with a
+    `StageCache` entry in the same stage dir.
     """
 
     def __init__(self, root: Path, *, enabled: bool = True) -> None:
@@ -337,9 +329,8 @@ class VectorCache:
 def hash_texts(texts: Sequence[str]) -> str:
     """Embedding is a pure function of text, so the cache keys on text alone.
 
-    Deliberately *not* `hash_rows(chunks)`: a chunk whose bbox shifted by a pixel embeds to
-    the same vector, and re-running the encoder over an unchanged corpus is the exact cost
-    §0 non-negotiable 1 exists to prevent.
+    Not `hash_rows(chunks)`: a chunk whose bbox moved a pixel embeds identically, and
+    re-encoding an unchanged corpus is what §0 non-negotiable 1 exists to prevent.
     """
     digest = hashlib.sha256()
     for text in texts:
@@ -364,8 +355,8 @@ def embed_chunks(
 ) -> np.ndarray:
     """Chunks -> `[n_chunks, dim]` float32, row-aligned with `chunks`, cached on `.npy`.
 
-    `embedder` is optional so a cache hit never compiles the IR: the key needs only the
-    fingerprint, which is a hash of the weights on disk, not a loaded model.
+    `embedder` is optional so a cache hit never compiles the IR — the key needs only the
+    fingerprint, a hash of the weights on disk.
     """
     texts = [c.text for c in chunks]
     fingerprint = (
