@@ -816,3 +816,34 @@ is still `gemma-4`. The Bash permission gate blocks `git push` in this environme
 (`gh` is not installed on this machine). `git remote set-head origin -a` resyncs afterwards.
 
 Commits: 1d4d9b2, 5d75704, fd4af10, 961c570, and this one.
+
+## 2026-08-28 09:23 — scripts/plot_eval.py: slide charts from an eval run
+Done: Five charts for the deck, generated from a run parquet rather than hand-drawn. SVG by
+hand — no plotting dependency, since §0.1 pins the dependency set and matplotlib is not in it.
+`--png` rasterises via qlmanage + sips on macOS; SVG is the portable output and both PowerPoint
+and Keynote import it directly.
+
+Charts: the abstain confusion matrix (answerable x abstained), top-1 score separation with the
+tau line, recall@k against the random floor, per-language recall/MRR, and the generator
+speed-vs-groundedness trade.
+
+Re-ran `eval.run --retriever dense` against the pinned 8-doc index to plot current numbers
+rather than the 2026-08-24 parquet, whose generation columns predate the #11/#17/#21 fixes
+(it still records ta groundedness 0.0). New run: data/eval/runs/20260828T011638Z_dense.parquet.
+
+**The confusion matrix, n=54:** 49 answerable/answered, 0 answerable/declined, 3
+unanswerable/answered, 2 unanswerable/declined. Abstain precision 1.000, abstain recall 0.400,
+no good answers lost. Every chart says so, but it is worth repeating: 5 unanswerable questions
+is thin evidence for the bottom row, and abstain precision 1.000 rests on 2 decisions.
+
+**Retrieval on this machine does not match the deck.** This box gives recall@1 0.612, MRR@10
+0.736; README and base.yaml quote 0.633 / 0.743 from the Core Ultra 7 255H with the embedder on
+GPU.0. recall@5 0.898 and recall@10 0.980 agree. That gap is BLOCKERS #18 — INT8 embeddings
+differ between CPU and GPU, and it moves borderline ranks. The charts are stamped with the run
+id and host for exactly this reason, and the script exists so the deck can be regenerated on
+the Intel box rather than screenshotted from here.
+
+Output is `data/eval/charts/`, which is gitignored with the rest of `data/` — the script is
+the committed artefact, not the images.
+
+Verified: ruff clean, uv lock --check clean, pytest 868 passed / 8 skipped.
