@@ -167,7 +167,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG) -> Config:
         p = REPO_ROOT / p
     if not p.exists():
         raise FileNotFoundError(f"config not found: {p}")
-    raw = yaml.safe_load(p.read_text()) or {}
+    raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
     return Config.model_validate(raw)
 
 

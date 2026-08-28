@@ -227,7 +227,11 @@ def load_charset(ir_dir: Path, n_classes: int | None = None) -> list[str]:
         if not path.exists():
             continue
         try:
-            raw = json.loads(path.read_text()) if name.endswith(".json") else _read_yaml(path)
+            raw = (
+                json.loads(path.read_text(encoding="utf-8"))
+                if name.endswith(".json")
+                else _read_yaml(path)
+            )
         except (json.JSONDecodeError, ValueError) as exc:
             log.warning("ocr.charset_unreadable", path=str(path), error=str(exc))
             continue
@@ -262,7 +266,7 @@ def load_charset(ir_dir: Path, n_classes: int | None = None) -> list[str]:
 def _read_yaml(path: Path) -> dict[str, Any]:
     import yaml
 
-    loaded = yaml.safe_load(path.read_text())
+    loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(loaded, dict):
         raise ValueError(f"{path} does not parse to a mapping")
     return loaded

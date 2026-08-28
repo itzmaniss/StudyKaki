@@ -11,6 +11,7 @@ here by hand — never model output (CLAUDE.md).
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -162,6 +163,26 @@ def test_a_charset_that_does_not_match_the_ir_is_refused(tmp_path):
 def test_a_missing_charset_names_the_setup_command(tmp_path):
     with pytest.raises(OcrModelError, match="scripts.setup"):
         load_charset(tmp_path)
+
+
+def test_charset_reads_utf8_whatever_the_locale_is(tmp_path, monkeypatch):
+    """The Tamil and CJK dictionaries are UTF-8; a cp1252/ascii locale must not decide.
+
+    `read_text()` with no encoding uses the locale, so this simulates a C locale to prove
+    the call passes one explicitly.
+    """
+    chars = ["\u0b9c", "\u0bbe", "\u4e2d", "\u00e9"]
+    (tmp_path / "config.json").write_text(
+        json.dumps({"PostProcess": {"character_dict": chars}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    real = Path.read_text
+
+    def under_a_c_locale(self, encoding=None, **kw):
+        return real(self, encoding=encoding or "ascii", **kw)
+
+    monkeypatch.setattr(Path, "read_text", under_a_c_locale)
+    assert load_charset(tmp_path) == ["<blank>", *chars]
 
 
 class TestSoftmaxDetection:
